@@ -708,13 +708,11 @@ async function generateDocxForAccountInternal(
 
   // 1. 获取公众号名称
   const infoRes = await pool.query(`SELECT nickname FROM info WHERE fakeid = $1`, [fakeid]);
-  const infoRes = await pool.query(`SELECT nickname FROM info WHERE fakeid = $1`, [fakeid]);
   const accountName = infoRes.rows.length > 0 ? infoRes.rows[0].nickname || fakeid : fakeid;
   const safeDirName = filterInvalidFilenameChars(accountName);
   console.log(`${tag} 公众号：【${accountName}】目录名: ${safeDirName}`);
 
   // 2. 获取该公众号的所有文章（如果有时间范围限制则过滤）
-  const articles = await queryArticlesForExport(pool, fakeid, options);
   const articles = await queryArticlesForExport(pool, fakeid, options);
   result.total = articles.length;
   const syncInfo = options.articleUrls?.length
@@ -791,7 +789,6 @@ async function generateDocxForAccountInternal(
       });
 
       // 获取原始 HTML 内容（带重试逻辑）
-      let rawHtml: string | null = null;
       let rawHtml: string | null = null;
       let rawHtmlSource: 'db' | 'remote' | null = null;
       let cgiData: any = null;
@@ -998,7 +995,6 @@ async function generateDocxForAccountInternal(
       }
 
       // 按需生成各格式（缓存渲染结果）
-      if (rawHtml && rawHtmlSource === 'remote') {
       if (rawHtml && rawHtmlSource === 'remote') {
         await upsertArticleHtmlCache(pool, {
           fakeid,
