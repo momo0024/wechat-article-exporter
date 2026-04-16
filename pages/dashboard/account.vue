@@ -6,6 +6,7 @@ import type {
   GridOptions,
   GridReadyEvent,
   ICellRendererParams,
+  RowHeightParams,
   SelectionChangedEvent,
   ValueGetterParams,
 } from 'ag-grid-community';
@@ -22,8 +23,17 @@ import useLoginCheck from '~/composables/useLoginCheck';
 import { IMAGE_PROXY, websiteName } from '~/config';
 import { sharedGridOptions } from '~/config/shared-grid-options';
 import { getAccountSyncStatusLabel } from '~/shared/utils/account-sync-status';
+import {
+  getAccountSyncActionState,
+  getManualSyncProgressClass,
+  getManualSyncProgressText,
+  getManualSyncProgressUrl,
+  isBusyManualSyncStage,
+  isTerminalManualSyncStage,
+  type ManualSyncJobStatus,
+} from '~/shared/utils/manual-sync';
 import { deleteAccountData } from '~/store/v2';
-import { getAllInfo, importMpAccounts, type MpAccount } from '~/store/v2/info';
+import { getAllInfo, getInfoCache, importMpAccounts, type MpAccount } from '~/store/v2/info';
 import type { AccountManifest } from '~/types/account';
 import { exportAccountJsonFile } from '~/utils/exporter';
 import { createBooleanColumnFilterParams, createDateColumnFilterParams } from '~/utils/grid';
@@ -31,40 +41,6 @@ import { createBooleanColumnFilterParams, createDateColumnFilterParams } from '~
 useHead({
   title: `公众号管理 | ${websiteName}`,
 });
-
-type ManualSyncStage = 'queued' | 'syncing' | 'exporting' | 'finalizing' | 'completed' | 'failed' | 'cancelled' | 'cancelling';
-
-interface ManualSyncJobStatus {
-  jobId: string;
-  fakeid: string;
-  nickname: string;
-  stage: ManualSyncStage;
-  syncToTimestamp: number;
-  startedAt: number;
-  updatedAt: number;
-  cancelRequested: boolean;
-  pageNumber: number;
-  begin: number;
-  totalCount: number;
-  currentPageArticleCount: number;
-  currentPageFilteredCount: number;
-  currentArticleTitle: string | null;
-  currentArticleUrl: string | null;
-  currentArticleIndex: number;
-  currentArticleTotal: number;
-  retrying: boolean;
-  retryMessage: string | null;
-  articleCount: number;
-  generated: number;
-  skipped: number;
-  failed: number;
-  failedUrls: string[];
-  error?: string;
-}
-
-type AccountGridRow = MpAccount & {
-  manualSyncJob?: ManualSyncJobStatus | null;
-};
 
 const toast = toastFactory();
 const modal = useModal();
@@ -74,8 +50,9 @@ const { getSyncTimestamp, getSyncRangeLabel, getActualDateRange, isSyncAll } = u
 // syncToTimestamp 在每次同步时重新计算，确保使用最新的时间范围配置
 let syncToTimestamp = getSyncTimestamp();
 
-const ACCOUNT_PAGE_REFRESH_INTERVAL_MS = 30000;
-const MANUAL_SYNC_STATUS_POLL_INTERVAL_MS = 3000;
+const ACCOUNT_PAGE_REFRESH_INTERVAL_MS = 10000;
+const MANUAL_SYNC_STATUS_POLL_INTERVAL_MS = 5000;
+const SYNC_PROGRESS_ROW_HEIGHT = 64;
 
 // 账号事件总线，用于和 Credentials 面板保持列表同步
 const { accountEventBus } = useAccountEventBus();
@@ -88,11 +65,12 @@ accountEventBus.on(event => {
 const searchAccountDialogRef = ref<typeof GlobalSearchAccountDialog | null>(null);
 
 const addBtnLoading = ref(false);
-const manualSyncJobs = ref<Record<string, ManualSyncJobStatus>>({});
-const manualSyncWaiters = new Map<string, (status: ManualSyncJobStatus) => void>();
-let manualSyncStatusTimer: number | null = null;
-let isPollingManualSyncJobs = false;
+const isSyncing = ref(false);
+const syncingRowId = ref<string | null>(null);
+const currentSyncJobId = ref<string | null>(null);
+const syncStatus = ref<ManualSyncJobStatus | null>(null);
 let isRefreshingAccounts = false;
+let syncPollSequence = 0;
 
 function addAccount() {
   if (!checkLogin()) return;
@@ -117,10 +95,6 @@ function sleep(ms: number) {
   return new Promise(resolve => window.setTimeout(resolve, ms));
 }
 
-function isTerminalSyncStage(stage: ManualSyncStage) {
-  return stage === 'completed' || stage === 'failed' || stage === 'cancelled';
-}
-
 async function startManualSyncRequest(account: MpAccount) {
   return await $fetch<{ jobId: string; status: ManualSyncJobStatus }>('/api/web/worker/manual-sync', {
     method: 'POST',
@@ -134,183 +108,165 @@ async function startManualSyncRequest(account: MpAccount) {
 }
 
 async function getManualSyncStatus(jobId?: string) {
-  return await $fetch<ManualSyncJobStatus>('/api/web/worker/manual-sync-status', jobId
+  return await $fetch<ManualSyncJobStatus | null>('/api/web/worker/manual-sync-status', jobId
     ? {
         query: { jobId },
       }
     : undefined);
 }
 
-async function getManualSyncStatuses(jobIds?: string[]) {
-  return await $fetch<ManualSyncJobStatus[]>('/api/web/worker/manual-sync-status', {
-    query: jobIds && jobIds.length > 0
-      ? { jobIds: jobIds.join(',') }
-      : { all: '1' },
+function applySyncStatus(status: ManualSyncJobStatus) {
+  currentSyncJobId.value = status.jobId;
+  syncStatus.value = status;
+  syncingRowId.value = status.fakeid;
+  isSyncing.value = !isTerminalManualSyncStage(status.stage);
+}
+
+const syncStatusText = computed(() => getManualSyncProgressText(syncStatus.value, { includeNickname: true }));
+const syncStatusUrl = computed(() => getManualSyncProgressUrl(syncStatus.value));
+const syncStatusClass = computed(() => getManualSyncProgressClass(syncStatus.value));
+const canCancelCurrentSync = computed(() => Boolean(currentSyncJobId.value) && isBusyManualSyncStage(syncStatus.value?.stage));
+
+function clearSyncRuntimeState() {
+  isSyncing.value = false;
+  syncingRowId.value = null;
+  currentSyncJobId.value = null;
+  syncStatus.value = null;
+  syncPollSequence += 1;
+}
+
+function replaceRow(account: MpAccount) {
+  const rowIndex = globalRowData.findIndex(row => row.fakeid === account.fakeid);
+  if (rowIndex === -1) {
+    globalRowData = [account, ...globalRowData];
+  } else {
+    const nextRows = [...globalRowData];
+    nextRows.splice(rowIndex, 1, account);
+    globalRowData = nextRows;
+  }
+
+  gridApi.value?.setGridOption('rowData', globalRowData);
+}
+
+async function updateRow(fakeid: string) {
+  const account = await getInfoCache(fakeid);
+  if (!account) {
+    await refresh();
+    return;
+  }
+
+  replaceRow(account);
+}
+
+function getRowSyncActionState(account: Pick<MpAccount, 'fakeid' | 'status' | 'is_delete'>) {
+  return getAccountSyncActionState({
+    fakeid: account.fakeid,
+    status: account.status,
+    isDelete: account.is_delete,
+    isDeleting: isDeleting.value,
+    isManualSyncing: isSyncing.value,
+    syncingFakeid: syncingRowId.value,
+    syncStatus: syncStatus.value,
   });
 }
 
-function getTrackedManualSyncJob(fakeid: string): ManualSyncJobStatus | null {
-  const jobs = Object.values(manualSyncJobs.value)
-    .filter(job => job.fakeid === fakeid && !isTerminalSyncStage(job.stage))
-    .sort((left, right) => right.updatedAt - left.updatedAt);
-
-  return jobs[0] || null;
+function canSyncAccount(account: Pick<MpAccount, 'fakeid' | 'status' | 'is_delete'>) {
+  return !getRowSyncActionState(account).disableSync;
 }
 
-function mergeGridRows(rows: MpAccount[]): AccountGridRow[] {
-  return rows.map(row => ({
-    ...row,
-    manualSyncJob: getTrackedManualSyncJob(row.fakeid),
-  }));
-}
-
-function applyGridRows(rows: MpAccount[]) {
-  globalRowData = mergeGridRows(rows);
-  gridApi.value?.setGridOption('rowData', globalRowData);
-}
-
-function patchGridRowsWithManualSyncJobs() {
-  globalRowData = globalRowData.map(row => ({
-    ...row,
-    manualSyncJob: getTrackedManualSyncJob(row.fakeid),
-  }));
-  gridApi.value?.setGridOption('rowData', globalRowData);
-}
-
-function trackManualSyncJob(status: ManualSyncJobStatus) {
-  manualSyncJobs.value = {
-    ...manualSyncJobs.value,
-    [status.jobId]: status,
-  };
-  patchGridRowsWithManualSyncJobs();
-}
-
-function removeTrackedManualSyncJob(jobId: string) {
-  if (!manualSyncJobs.value[jobId]) {
-    return;
+const selectedRows = ref<MpAccount[]>([]);
+const hasSelectedRows = computed(() => selectedRows.value.length > 0);
+const isBatchSyncDisabled = computed(() => {
+  if (isDeleting.value || selectedRows.value.length === 0) {
+    return true;
   }
 
-  const nextJobs = { ...manualSyncJobs.value };
-  delete nextJobs[jobId];
-  manualSyncJobs.value = nextJobs;
-  patchGridRowsWithManualSyncJobs();
-}
+  return selectedRows.value.some(account => !canSyncAccount(account));
+});
 
-function resolveManualSyncWaiter(status: ManualSyncJobStatus) {
-  const waiter = manualSyncWaiters.get(status.jobId);
-  if (!waiter) {
-    return;
-  }
+async function waitForManualSyncJob(fakeid: string, jobId: string) {
+  const pollSequence = ++syncPollSequence;
 
-  manualSyncWaiters.delete(status.jobId);
-  waiter(status);
-}
-
-function activeTrackedManualSyncJobIds() {
-  return Object.values(manualSyncJobs.value)
-    .filter(job => !isTerminalSyncStage(job.stage))
-    .map(job => job.jobId);
-}
-
-function hasActiveManualSyncJobs() {
-  return activeTrackedManualSyncJobIds().length > 0;
-}
-
-function stopManualSyncStatusPolling() {
-  if (manualSyncStatusTimer) {
-    window.clearInterval(manualSyncStatusTimer);
-    manualSyncStatusTimer = null;
-  }
-}
-
-async function pollManualSyncStatuses() {
-  const jobIds = activeTrackedManualSyncJobIds();
-  if (jobIds.length === 0 || isPollingManualSyncJobs) {
-    if (jobIds.length === 0) {
-      stopManualSyncStatusPolling();
-    }
-    return;
-  }
-
-  isPollingManualSyncJobs = true;
-  try {
-    const statuses = await getManualSyncStatuses(jobIds);
-    if (statuses.length === 0) {
-      return;
-    }
-
-    let shouldRefreshAccounts = false;
-    for (const status of statuses) {
-      trackManualSyncJob(status);
-      if (isTerminalSyncStage(status.stage)) {
-        shouldRefreshAccounts = true;
-        resolveManualSyncWaiter(status);
-        removeTrackedManualSyncJob(status.jobId);
+  while (true) {
+    let status: ManualSyncJobStatus | null;
+    try {
+      status = await getManualSyncStatus(jobId);
+    } catch (error: any) {
+      const statusCode = error?.statusCode || error?.data?.statusCode || error?.response?.status;
+      if (statusCode === 404) {
+        await updateRow(fakeid);
+        throw new Error('同步任务已中断，请重新同步');
       }
+      throw error;
     }
 
-    if (shouldRefreshAccounts) {
-      await refresh();
+    if (!status) {
+      await updateRow(fakeid);
+      throw new Error('同步任务已中断，请重新同步');
     }
-  } catch (error) {
-    console.error('轮询手动同步状态失败:', error);
-  } finally {
-    isPollingManualSyncJobs = false;
-    if (!hasActiveManualSyncJobs()) {
-      stopManualSyncStatusPolling();
+
+    if (pollSequence !== syncPollSequence) {
+      return status;
     }
+
+    applySyncStatus(status);
+    await updateRow(fakeid);
+
+    if (isTerminalManualSyncStage(status.stage)) {
+      return status;
+    }
+
+    await sleep(MANUAL_SYNC_STATUS_POLL_INTERVAL_MS);
   }
 }
 
-function ensureManualSyncStatusPolling() {
-  if (manualSyncStatusTimer) {
-    return;
-  }
-
-  void pollManualSyncStatuses();
-  manualSyncStatusTimer = window.setInterval(() => {
-    void pollManualSyncStatuses();
-  }, MANUAL_SYNC_STATUS_POLL_INTERVAL_MS);
-}
-
-async function hydrateManualSyncJobs() {
+async function restoreActiveManualSyncJob() {
   try {
-    const statuses = await getManualSyncStatuses();
-    if (statuses.length === 0) {
+    const status = await getManualSyncStatus();
+    if (!status || isTerminalManualSyncStage(status.stage)) {
+      clearSyncRuntimeState();
       return;
     }
 
-    const nextJobs: Record<string, ManualSyncJobStatus> = {};
-    for (const status of statuses) {
-      nextJobs[status.jobId] = status;
+    applySyncStatus(status);
+    await updateRow(status.fakeid);
+
+    void waitForManualSyncJob(status.fakeid, status.jobId)
+      .catch(error => {
+        console.warn('[sync] 恢复手动同步状态失败:', error);
+      })
+      .finally(async () => {
+        clearSyncRuntimeState();
+        await refresh();
+      });
+  } catch (error: any) {
+    const statusCode = error?.statusCode || error?.data?.statusCode || error?.response?.status;
+    if (statusCode === 404) {
+      clearSyncRuntimeState();
+      return;
     }
-    manualSyncJobs.value = nextJobs;
-    patchGridRowsWithManualSyncJobs();
-    ensureManualSyncStatusPolling();
-  } catch (error) {
-    console.error('初始化手动同步状态失败:', error);
+
+    console.warn('[sync] 获取当前手动同步任务失败:', error);
   }
 }
 
-async function waitForManualSyncJob(jobId: string) {
-  const trackedStatus = manualSyncJobs.value[jobId];
-  if (trackedStatus && isTerminalSyncStage(trackedStatus.stage)) {
-    return trackedStatus;
+async function cancelCurrentSync() {
+  if (!currentSyncJobId.value) {
+    return;
   }
 
-  ensureManualSyncStatusPolling();
-  return await new Promise<ManualSyncJobStatus>((resolve) => {
-    manualSyncWaiters.set(jobId, resolve);
-  });
-}
-
-async function cancelManualSyncJob(job: ManualSyncJobStatus) {
   const status = await $fetch<ManualSyncJobStatus>('/api/web/worker/manual-sync-cancel', {
     method: 'POST',
-    body: { jobId: job.jobId },
+    body: { jobId: currentSyncJobId.value },
   });
-  trackManualSyncJob(status);
-  ensureManualSyncStatusPolling();
+  applySyncStatus(status);
+  await updateRow(status.fakeid);
+}
+
+function requestCancelCurrentSync() {
+  cancelCurrentSync().catch((error: any) => {
+    toast.error('取消同步失败', error?.data?.message || error?.message || '取消同步失败');
+  });
 }
 
 async function loadAccountArticle(account: MpAccount) {
@@ -323,12 +279,10 @@ async function loadAccountArticle(account: MpAccount) {
 
   try {
     const { jobId, status } = await startManualSyncRequest(account);
-    trackManualSyncJob(status);
-    ensureManualSyncStatusPolling();
+    applySyncStatus(status);
 
-    const finalStatus = await waitForManualSyncJob(jobId);
-    await refresh();
-    removeTrackedManualSyncJob(jobId);
+    const finalStatus = await waitForManualSyncJob(account.fakeid, jobId);
+    await updateRow(account.fakeid);
 
     if (finalStatus.stage === 'cancelled') {
       throw new Error('已取消同步');
@@ -350,6 +304,8 @@ async function loadAccountArticle(account: MpAccount) {
       modal.open(LoginModal);
     }
     throw error;
+  } finally {
+    clearSyncRuntimeState();
   }
 }
 
@@ -358,56 +314,34 @@ async function loadSelectedAccountArticle() {
   if (!checkLogin()) return;
 
   const rows = getSelectedRows();
-  const activeRows = rows.filter(account => !account.is_delete);
-  const skippedDisabled = rows.length - activeRows.length;
+  if (rows.length === 0) {
+    return;
+  }
 
-  if (activeRows.length === 0) {
-    toast.warning('无法同步', '选中的公众号都已禁用');
+  if (rows.some(account => !canSyncAccount(account))) {
+    toast.warning('无法同步', '选中的公众号中包含不可同步项，请先取消选择或等待当前任务结束');
     return;
   }
 
   try {
     syncToTimestamp = getSyncTimestamp();
-    const jobRefs = [];
-    for (const account of activeRows) {
-      const job = await startManualSyncRequest(account);
-      trackManualSyncJob(job.status);
-      jobRefs.push({ account, jobId: job.jobId });
-    }
-
-    ensureManualSyncStatusPolling();
 
     let totalGenerated = 0;
     let totalSkipped = 0;
     let totalFailed = 0;
 
-    const finalStatuses = await Promise.all(jobRefs.map(job => waitForManualSyncJob(job.jobId)));
-    for (const status of finalStatuses) {
+    for (const account of rows) {
+      const status = await loadAccountArticle(account);
       totalGenerated += status.generated;
       totalSkipped += status.skipped;
       totalFailed += status.failed;
-
-      if (status.stage === 'failed') {
-        if (status.error === 'session expired' || status.error?.includes('未登录')) {
-          modal.open(LoginModal);
-        }
-        throw new Error(status.error || '同步失败');
-      }
-
-      if (status.stage === 'cancelled') {
-        throw new Error('已取消同步');
-      }
     }
 
-    await refresh();
     const rangeHint = isSyncAll() ? '' : `（同步范围：${getSyncRangeLabel()}）`;
     toast.success(
       '同步完成',
-      `已成功同步 ${activeRows.length} 个公众号${rangeHint}，文档生成 ${totalGenerated} 篇，跳过 ${totalSkipped} 篇，失败 ${totalFailed} 篇`
+      `已成功同步 ${rows.length} 个公众号${rangeHint}，文档生成 ${totalGenerated} 篇，跳过 ${totalSkipped} 篇，失败 ${totalFailed} 篇`
     );
-    if (skippedDisabled > 0) {
-      toast.warning('已跳过禁用公众号', `本次跳过 ${skippedDisabled} 个已禁用公众号`);
-    }
   } catch (e: any) {
     if (e.message === '已取消同步') {
       toast.warning('同步已取消', '当前同步任务已停止');
@@ -417,7 +351,7 @@ async function loadSelectedAccountArticle() {
   }
 }
 
-let globalRowData: AccountGridRow[] = [];
+let globalRowData: MpAccount[] = [];
 
 const columnDefs = ref<ColDef[]>([
   {
@@ -551,6 +485,11 @@ const columnDefs = ref<ColDef[]>([
     valueGetter: params => (params.data.total_count === 0 ? 0 : params.data.count / params.data.total_count),
     cellDataType: 'number',
     cellRenderer: GridLoadProgress,
+    autoHeight: true,
+    cellRendererParams: {
+      syncingRowId,
+      syncStatus,
+    },
     filter: 'agNumberColumnFilter',
     minWidth: 260,
   },
@@ -590,15 +529,11 @@ const columnDefs = ref<ColDef[]>([
             }
           });
       },
-      onCancelSync: (params: ICellRendererParams) => {
-        const job = (params.data as AccountGridRow).manualSyncJob;
-        if (!job) return;
-
-        cancelManualSyncJob(job).catch((error: any) => {
-          toast.error('取消同步失败', error?.data?.message || error?.message || '取消同步失败');
-        });
-      },
+      onCancelSync: requestCancelCurrentSync,
       isDeleting: isDeleting,
+      isSyncing,
+      syncingRowId,
+      syncStatus,
     },
     cellClass: 'flex justify-center items-center',
     minWidth: 140,
@@ -611,6 +546,7 @@ const columnDefs = ref<ColDef[]>([
 const gridOptions: GridOptions = defu(
   {
     getRowId: (params: GetRowIdParams) => String(params.data.fakeid),
+    getRowHeight: (params: RowHeightParams) => (params.data?.fakeid === syncingRowId.value ? SYNC_PROGRESS_ROW_HEIGHT : undefined),
   },
   sharedGridOptions
 );
@@ -620,23 +556,27 @@ function onGridReady(params: GridReadyEvent) {
   gridApi.value = params.api;
 
   restoreColumnState();
-  void refresh();
-  void hydrateManualSyncJobs();
+  void refresh().then(() => restoreActiveManualSyncJob());
   if (!refreshTimer) {
     refreshTimer = window.setInterval(() => {
-      if (!hasActiveManualSyncJobs()) {
+      if (!isSyncing.value) {
         void refresh();
       }
     }, ACCOUNT_PAGE_REFRESH_INTERVAL_MS);
   }
 }
 
+watch([syncingRowId, syncStatus], async () => {
+  await nextTick();
+  gridApi.value?.resetRowHeights();
+}, { deep: true });
+
 onUnmounted(() => {
   if (refreshTimer) {
     window.clearInterval(refreshTimer);
     refreshTimer = null;
   }
-  stopManualSyncStatusPolling();
+  syncPollSequence += 1;
 });
 
 function onColumnStateChange() {
@@ -668,23 +608,21 @@ async function refresh() {
   isRefreshingAccounts = true;
   try {
     const accounts = await getAllInfo();
-    applyGridRows(accounts);
+    globalRowData = accounts;
+    gridApi.value?.setGridOption('rowData', globalRowData);
   } finally {
     isRefreshingAccounts = false;
   }
 }
 
-// 当前是否有选中的行
-const hasSelectedRows = ref(false);
 function onSelectionChanged(evt: SelectionChangedEvent) {
-  hasSelectedRows.value = (evt.selectedNodes?.map(node => node.data) || []).length > 0;
+  selectedRows.value = (evt.selectedNodes?.map(node => node.data as MpAccount) || []);
 }
 function getSelectedRows() {
   const rows: MpAccount[] = [];
   gridApi.value?.forEachNodeAfterFilterAndSort(node => {
     if (node.isSelected()) {
-      const { manualSyncJob: _manualSyncJob, ...account } = node.data as AccountGridRow;
-      rows.push(account);
+      rows.push(node.data as MpAccount);
     }
   });
   return rows;
@@ -807,7 +745,7 @@ function exportAccount() {
           color="black"
           icon="i-heroicons:arrow-path-rounded-square-20-solid"
           class="disabled:opacity-35"
-          :disabled="isDeleting || !hasSelectedRows"
+          :disabled="isBatchSyncDisabled"
           @click="loadSelectedAccountArticle"
           >同步</UButton
         >
@@ -815,6 +753,35 @@ function exportAccount() {
           <span class="self-end text-sm text-blue-500 font-medium">同步范围: {{ getActualDateRange() }}</span>
         </div>
       </header>
+
+      <div v-if="syncStatusText" class="border-b border-gray-200 bg-slate-50 px-3 py-2">
+        <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium">
+            <span :class="syncStatusClass">{{ syncStatusText }}</span>
+            <a
+              v-if="syncStatusUrl"
+              :href="syncStatusUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="break-all font-mono text-xs text-sky-600 underline hover:text-sky-700"
+            >
+              {{ syncStatusUrl }}
+            </a>
+          </div>
+          <div class="flex justify-end">
+            <UButton
+              v-if="canCancelCurrentSync"
+              color="rose"
+              size="xs"
+              variant="soft"
+              :loading="syncStatus?.stage === 'cancelling'"
+              @click="requestCancelCurrentSync"
+            >
+              {{ syncStatus?.stage === 'cancelling' ? '取消中' : '取消同步' }}
+            </UButton>
+          </div>
+        </div>
+      </div>
 
       <!-- 数据表格 -->
       <ag-grid-vue

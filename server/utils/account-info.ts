@@ -1,5 +1,6 @@
 import { getPool } from '~/server/db/postgres';
 import {
+  ACCOUNT_SYNC_STATUS,
   normalizeAccountSyncStatus,
   type AccountSyncStatus,
   type AccountSyncStatusValue,
@@ -108,6 +109,18 @@ export async function listSyncableAccounts(options: { excludeInterface?: boolean
 export async function updateAccountSyncStatus(fakeid: string, status: AccountSyncStatus): Promise<void> {
   const pool = getPool();
   await pool.query(`UPDATE info SET status = $2 WHERE fakeid = $1`, [fakeid, status]);
+}
+
+export async function recoverInterruptedAccountSyncStatuses(): Promise<number> {
+  const pool = getPool();
+  const res = await pool.query(
+    `UPDATE info
+     SET status = $1
+     WHERE status = ANY($2::text[])`,
+    [ACCOUNT_SYNC_STATUS.FAILED, [ACCOUNT_SYNC_STATUS.QUEUED, ACCOUNT_SYNC_STATUS.SYNCING]],
+  );
+
+  return res.rowCount || 0;
 }
 
 export async function getPublicAccountStatuses(fakeids: string[]): Promise<Array<{ fakeid: string; status: AccountSyncStatusValue }>> {

@@ -15,6 +15,10 @@ export default defineEventHandler((event) => {
   const status = getManualSyncJobStatus(jobId);
 
   if (!status) {
+    if (!jobId) {
+      return null;
+    }
+
     throw createError({
       statusCode: 404,
       message: '同步任务不存在',

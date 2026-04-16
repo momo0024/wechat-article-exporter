@@ -9,6 +9,7 @@ import { shouldSkipMpArticleUrl } from '#shared/utils';
 import { RETRY_POLICY } from '~/config';
 import { getPool } from '~/server/db/postgres';
 import { notifyArticleAccessTooFrequent, waitRandomArticleFetchDelay } from '~/server/utils/article-fetch';
+import { getPreferencesFromDB } from '~/server/utils/preferences';
 import { isArticleAccessTooFrequentMessage, isPolicyViolationMessage, validateHTMLContent } from '~/shared/utils/html';
 
 // ==================== 支持的导出格式 ====================
@@ -517,8 +518,8 @@ export function getAutoExportFormats(): AutoExportFormat[] {
   const raw = process.env.AUTO_EXPORT_FORMATS || 'word';
   return raw
     .split(',')
-    .map((s) => s.trim().toLowerCase() as AutoExportFormat)
-    .filter((f) => VALID_FORMATS.includes(f));
+    .map(s => s.trim().toLowerCase() as AutoExportFormat)
+    .filter(f => VALID_FORMATS.includes(f));
 }
 
 // ==================== 主逻辑 ====================
@@ -556,7 +557,7 @@ function validateFetchedHtml(html: string): {
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 export interface AutoExportResult {
@@ -622,7 +623,11 @@ function createEmptyExportResult(formats: AutoExportFormat[]): AutoExportResult 
   };
 }
 
-async function queryArticlesForExport(pool: ReturnType<typeof getPool>, fakeid: string, options: GenerateDocxInternalOptions) {
+async function queryArticlesForExport(
+  pool: ReturnType<typeof getPool>,
+  fakeid: string,
+  options: GenerateDocxInternalOptions
+) {
   if (options.articleUrls && options.articleUrls.length > 0) {
     const articleUrls = [...new Set(options.articleUrls.filter(Boolean))];
     if (articleUrls.length === 0) {
@@ -654,7 +659,33 @@ async function queryArticlesForExport(pool: ReturnType<typeof getPool>, fakeid: 
   return res.rows.map((row: any) => row.data);
 }
 
-async function generateDocxForAccountInternal(fakeid: string, options: GenerateDocxInternalOptions): Promise<AutoExportResult> {
+async function upsertArticleHtmlCache(
+  pool: ReturnType<typeof getPool>,
+  input: {
+    fakeid: string;
+    url: string;
+    title: string;
+    rawHtml: string;
+  }
+) {
+  const [, commentId] = validateHTMLContent(input.rawHtml);
+  await pool.query(
+    `INSERT INTO html (url, fakeid, title, comment_id, file, file_type)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (url) DO UPDATE SET
+       fakeid = EXCLUDED.fakeid,
+       title = EXCLUDED.title,
+       comment_id = EXCLUDED.comment_id,
+       file = EXCLUDED.file,
+       file_type = EXCLUDED.file_type`,
+    [input.url, input.fakeid, input.title, commentId, Buffer.from(input.rawHtml, 'utf-8'), 'text/html']
+  );
+}
+
+async function generateDocxForAccountInternal(
+  fakeid: string,
+  options: GenerateDocxInternalOptions
+): Promise<AutoExportResult> {
   const outputDir = getDocxOutputDir();
   if (!outputDir) {
     throw new Error('AUTO_EXPORT_DIR 环境变量未配置');
@@ -667,6 +698,8 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
 
   const pool = getPool();
   const result = createEmptyExportResult(formats);
+  const preferences = await getPreferencesFromDB();
+  const forceDownloadContent = preferences?.downloadConfig?.forceDownloadContent === true;
 
   const tag = `[${options.source}]`;
 
@@ -675,11 +708,13 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
 
   // 1. 获取公众号名称
   const infoRes = await pool.query(`SELECT nickname FROM info WHERE fakeid = $1`, [fakeid]);
-  const accountName = infoRes.rows.length > 0 ? (infoRes.rows[0].nickname || fakeid) : fakeid;
+  const infoRes = await pool.query(`SELECT nickname FROM info WHERE fakeid = $1`, [fakeid]);
+  const accountName = infoRes.rows.length > 0 ? infoRes.rows[0].nickname || fakeid : fakeid;
   const safeDirName = filterInvalidFilenameChars(accountName);
   console.log(`${tag} 公众号：【${accountName}】目录名: ${safeDirName}`);
 
   // 2. 获取该公众号的所有文章（如果有时间范围限制则过滤）
+  const articles = await queryArticlesForExport(pool, fakeid, options);
   const articles = await queryArticlesForExport(pool, fakeid, options);
   result.total = articles.length;
   const syncInfo = options.articleUrls?.length
@@ -696,8 +731,8 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
   console.log(`${tag} 公众号：【${accountName}】输出目录已就绪: ${accountDir}`);
 
   // 4. 区分逐篇格式和汇总格式
-  const perArticleFormats = formats.filter((f) => PER_ARTICLE_FORMATS.includes(f));
-  const aggregateFormats = formats.filter((f) => AGGREGATE_FORMATS.includes(f));
+  const perArticleFormats = formats.filter(f => PER_ARTICLE_FORMATS.includes(f));
+  const aggregateFormats = formats.filter(f => AGGREGATE_FORMATS.includes(f));
 
   // 5. 逐篇文章生成（html/txt/markdown/word）
   const failedUrls: { title: string; url: string; reason: string }[] = [];
@@ -712,7 +747,9 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
       if (!url) {
         result.failed++;
         result.errors.push(`无链接: ${title}`);
-        console.error(`${tag} 公众号：【${accountName}】文章无链接，跳过: ${title}，article keys: ${Object.keys(article).join(', ')}`);
+        console.error(
+          `${tag} 公众号：【${accountName}】文章无链接，跳过: ${title}，article keys: ${Object.keys(article).join(', ')}`
+        );
         continue;
       }
       if (shouldSkipMpArticleUrl(url)) {
@@ -722,22 +759,22 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
       }
 
       const articleTime = article.update_time || article.create_time;
-      const articleDate = articleTime
-        ? new Date(articleTime * 1000).toLocaleDateString()
-        : '未知';
-      const dateSuffix = articleTime
-        ? dayjs.unix(articleTime).format('YYYY-MM-DD')
-        : 'unknown';
+      const articleDate = articleTime ? new Date(articleTime * 1000).toLocaleDateString() : '未知';
+      const dateSuffix = articleTime ? dayjs.unix(articleTime).format('YYYY-MM-DD') : 'unknown';
       const safeTitle = filterInvalidFilenameChars(title);
       const fileBaseName = `${dateSuffix}-${safeTitle}`;
 
-      console.log(`${tag} 公众号：【${accountName}】 [${articleIndex + 1}/${articles.length}] 处理文章: ${title} (${articleDate}) | ${url}`);
+      console.log(
+        `${tag} 公众号：【${accountName}】 [${articleIndex + 1}/${articles.length}] 处理文章: ${title} (${articleDate}) | ${url}`
+      );
 
       // 检查是否所有格式的文件都已存在
-      const missingFormats = perArticleFormats.filter((fmt) => {
-        const filePath = path.join(accountDir, `${fileBaseName}${FORMAT_EXT[fmt]}`);
-        return !fs.existsSync(filePath);
-      });
+      const missingFormats = forceDownloadContent
+        ? [...perArticleFormats]
+        : perArticleFormats.filter(fmt => {
+            const filePath = path.join(accountDir, `${fileBaseName}${FORMAT_EXT[fmt]}`);
+            return !fs.existsSync(filePath);
+          });
 
       if (missingFormats.length === 0) {
         result.skipped++;
@@ -755,47 +792,59 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
 
       // 获取原始 HTML 内容（带重试逻辑）
       let rawHtml: string | null = null;
+      let rawHtml: string | null = null;
+      let rawHtmlSource: 'db' | 'remote' | null = null;
       let cgiData: any = null;
       let skippedDuringParseRetry = false;
       let skipReason: string | null = null;
       let lastFailureReason: string | null = null;
 
       // 从 html 表获取已缓存的 HTML 内容
-      const htmlRes = await pool.query(`SELECT file, file_type FROM html WHERE url = $1`, [url]);
-      if (htmlRes.rows.length > 0 && htmlRes.rows[0].file) {
-        const fileBuffer: Buffer = htmlRes.rows[0].file;
-        rawHtml = fileBuffer.toString('utf-8');
-        const cachedHtmlStatus = validateFetchedHtml(rawHtml);
-        if (cachedHtmlStatus.skip) {
-          result.skipped++;
-          console.log(`${tag} 公众号：【${accountName}】跳过不可导出文章: ${title} — ${cachedHtmlStatus.reason} | ${url}`);
-          continue;
+      if (!forceDownloadContent) {
+        const htmlRes = await pool.query(`SELECT file, file_type FROM html WHERE url = $1`, [url]);
+        if (htmlRes.rows.length > 0 && htmlRes.rows[0].file) {
+          const fileBuffer: Buffer = htmlRes.rows[0].file;
+          rawHtml = fileBuffer.toString('utf-8');
+          rawHtmlSource = 'db';
+          const cachedHtmlStatus = validateFetchedHtml(rawHtml);
+          if (cachedHtmlStatus.skip) {
+            result.skipped++;
+            console.log(
+              `${tag} 公众号：【${accountName}】跳过不可导出文章: ${title} — ${cachedHtmlStatus.reason} | ${url}`
+            );
+            continue;
+          }
+          if (cachedHtmlStatus.notify) {
+            lastFailureReason = cachedHtmlStatus.reason;
+            await notifyArticleAccessTooFrequent({
+              source: 'docx-generator-cache',
+              accountName,
+              title,
+              url,
+              reason: cachedHtmlStatus.reason,
+            });
+            rawHtml = null;
+            rawHtmlSource = null;
+          }
+          if (cachedHtmlStatus.retryable) {
+            lastFailureReason = cachedHtmlStatus.reason;
+            rawHtml = null;
+            rawHtmlSource = null;
+          }
         }
-        if (cachedHtmlStatus.notify) {
-          lastFailureReason = cachedHtmlStatus.reason;
-          await notifyArticleAccessTooFrequent({
-            source: 'docx-generator-cache',
-            accountName,
-            title,
-            url,
-            reason: cachedHtmlStatus.reason,
-          });
-          rawHtml = null;
-        }
-        if (cachedHtmlStatus.retryable) {
-          lastFailureReason = cachedHtmlStatus.reason;
-          rawHtml = null;
-        }
+
+        // 如果没有缓存，尝试在线抓取（带重试）
       }
 
-      // 如果没有缓存，尝试在线抓取（带重试）
       if (!rawHtml) {
         console.log(`${tag} 公众号：【${accountName}】HTML 缓存不存在，尝试在线抓取: ${title} | ${url}`);
         for (let attempt = 0; attempt <= RETRY_POLICY.articleExport.retries; attempt++) {
           assertNotCancelled(options.isCancelled);
           if (attempt > 0) {
             const retryMessage = `正在重试抓取第 ${articleIndex + 1}/${articles.length} 篇《${title}》，第 ${attempt}/${RETRY_POLICY.articleExport.retries} 次`;
-            console.warn(`${tag} 公众号：【${accountName}】${retryMessage}，${RETRY_POLICY.articleExport.delayMs / 1000} 秒后继续 | ${url}`);
+            console.warn(
+              `${tag} 公众号：【${accountName}】${retryMessage}，${RETRY_POLICY.articleExport.delayMs / 1000} 秒后继续 | ${url}`
+            );
             await options.onRetry?.({
               stage: 'exporting',
               scope: 'article-fetch',
@@ -840,9 +889,12 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
             }
 
             rawHtml = fetchedHtml;
+            rawHtmlSource = 'remote';
             break;
           } catch (e: any) {
-            console.error(`${tag} 公众号：【${accountName}】抓取异常（第 ${attempt + 1} 次）: ${title} - ${e.message} | ${url}`);
+            console.error(
+              `${tag} 公众号：【${accountName}】抓取异常（第 ${attempt + 1} 次）: ${title} - ${e.message} | ${url}`
+            );
           }
         }
         if (skipReason) {
@@ -868,7 +920,9 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
         for (let attempt = 1; attempt <= RETRY_POLICY.articleExport.retries; attempt++) {
           assertNotCancelled(options.isCancelled);
           const retryMessage = `正在重试解析第 ${articleIndex + 1}/${articles.length} 篇《${title}》，第 ${attempt}/${RETRY_POLICY.articleExport.retries} 次`;
-          console.warn(`${tag} 公众号：【${accountName}】${retryMessage}，${RETRY_POLICY.articleExport.delayMs / 1000} 秒后继续 | ${url}`);
+          console.warn(
+            `${tag} 公众号：【${accountName}】${retryMessage}，${RETRY_POLICY.articleExport.delayMs / 1000} 秒后继续 | ${url}`
+          );
           await options.onRetry?.({
             stage: 'exporting',
             scope: 'cgi-parse',
@@ -893,7 +947,9 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
             if (retryHtmlStatus.skip) {
               result.skipped++;
               skippedDuringParseRetry = true;
-              console.log(`${tag} 公众号：【${accountName}】重试后发现不可导出文章: ${title} — ${retryHtmlStatus.reason} | ${url}`);
+              console.log(
+                `${tag} 公众号：【${accountName}】重试后发现不可导出文章: ${title} — ${retryHtmlStatus.reason} | ${url}`
+              );
               break;
             }
             if (retryHtmlStatus.notify) {
@@ -914,11 +970,14 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
 
             cgiData = parseCgiDataNewServer(retryHtml);
             rawHtml = retryHtml;
+            rawHtmlSource = 'remote';
             if (cgiData) {
               break;
             }
           } catch (e: any) {
-            console.error(`${tag} 公众号：【${accountName}】重试抓取异常（第 ${attempt} 次）: ${title} - ${e.message} | ${url}`);
+            console.error(
+              `${tag} 公众号：【${accountName}】重试抓取异常（第 ${attempt} 次）: ${title} - ${e.message} | ${url}`
+            );
           }
         }
       }
@@ -929,7 +988,9 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
 
       if (!cgiData) {
         result.failed++;
-        const reason = lastFailureReason ? `解析 cgiData 失败（已重试）: ${lastFailureReason}` : '解析 cgiData 失败（已重试）';
+        const reason = lastFailureReason
+          ? `解析 cgiData 失败（已重试）: ${lastFailureReason}`
+          : '解析 cgiData 失败（已重试）';
         result.errors.push(`${reason}: ${title} | ${url}`);
         failedUrls.push({ title, url, reason });
         console.error(`${tag} 公众号：【${accountName}】解析 cgiData 最终失败: ${title} | ${url}`);
@@ -937,6 +998,16 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
       }
 
       // 按需生成各格式（缓存渲染结果）
+      if (rawHtml && rawHtmlSource === 'remote') {
+      if (rawHtml && rawHtmlSource === 'remote') {
+        await upsertArticleHtmlCache(pool, {
+          fakeid,
+          url,
+          title,
+          rawHtml,
+        });
+      }
+
       let renderedHtml: string | null = null;
       let articleGenerated = false;
 
@@ -944,7 +1015,14 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
         assertNotCancelled(options.isCancelled);
         const filePath = path.join(accountDir, `${fileBaseName}${FORMAT_EXT[fmt]}`);
         try {
-          const buf = await convertToFormat(fmt, cgiData, () => renderedHtml, async (html) => { renderedHtml = html; });
+          const buf = await convertToFormat(
+            fmt,
+            cgiData,
+            () => renderedHtml,
+            async html => {
+              renderedHtml = html;
+            }
+          );
           fs.writeFileSync(filePath, buf);
           articleGenerated = true;
           console.log(`${tag} 公众号：【${accountName}】生成成功: ${fileBaseName}${FORMAT_EXT[fmt]}`);
@@ -997,11 +1075,15 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
         if (fmt === 'json') {
           const jsonStr = JSON.stringify(exportEntities, null, 2);
           fs.writeFileSync(filePath, jsonStr, 'utf-8');
-          console.log(`${tag} 公众号：【${accountName}】JSON 汇总生成成功: ${safeDirName}${FORMAT_EXT[fmt]}（${exportEntities.length} 篇）`);
+          console.log(
+            `${tag} 公众号：【${accountName}】JSON 汇总生成成功: ${safeDirName}${FORMAT_EXT[fmt]}（${exportEntities.length} 篇）`
+          );
         } else if (fmt === 'excel') {
           const buf = await generateExcelBuffer(exportEntities);
           fs.writeFileSync(filePath, buf);
-          console.log(`${tag} 公众号：【${accountName}】Excel 汇总生成成功: ${safeDirName}${FORMAT_EXT[fmt]}（${exportEntities.length} 篇）`);
+          console.log(
+            `${tag} 公众号：【${accountName}】Excel 汇总生成成功: ${safeDirName}${FORMAT_EXT[fmt]}（${exportEntities.length} 篇）`
+          );
         }
       } catch (e: any) {
         result.errors.push(`[${fmt}] 汇总文件: ${e.message}`);
@@ -1021,11 +1103,17 @@ async function generateDocxForAccountInternal(fakeid: string, options: GenerateD
     }
   }
 
-  console.log(`${tag} 公众号：【${accountName}】处理完成 — 总计: ${result.total}, 生成: ${result.generated}, 跳过: ${result.skipped}, 失败: ${result.failed}, 格式: [${formats.join(',')}]`);
+  console.log(
+    `${tag} 公众号：【${accountName}】处理完成 — 总计: ${result.total}, 生成: ${result.generated}, 跳过: ${result.skipped}, 失败: ${result.failed}, 格式: [${formats.join(',')}]`
+  );
   return result;
 }
 
-export async function generateDocxForAccount(fakeid: string, syncToTimestamp?: number, source: 'auto-export' | 'schedule' = 'auto-export'): Promise<AutoExportResult> {
+export async function generateDocxForAccount(
+  fakeid: string,
+  syncToTimestamp?: number,
+  source: 'auto-export' | 'schedule' = 'auto-export'
+): Promise<AutoExportResult> {
   return generateDocxForAccountInternal(fakeid, {
     source,
     syncToTimestamp,
@@ -1038,9 +1126,9 @@ export async function generateDocxForArticleUrls(
   source: ExportSource = 'manual-sync',
   onArticleStart?: (progress: ArticleExportProgress) => void | Promise<void>,
   isCancelled?: () => boolean,
-  onRetry?: (progress: ArticleExportRetryProgress) => void | Promise<void>,
+  onRetry?: (progress: ArticleExportRetryProgress) => void | Promise<void>
 ): Promise<AutoExportResult> {
-  const formats = getAutoExportFormats().filter((format) => PER_ARTICLE_FORMATS.includes(format));
+  const formats = getAutoExportFormats().filter(format => PER_ARTICLE_FORMATS.includes(format));
   if (formats.length === 0) {
     const result = createEmptyExportResult(formats);
     result.total = articleUrls.length;
@@ -1061,9 +1149,9 @@ export async function generateAggregateExportsForAccount(
   fakeid: string,
   syncToTimestamp?: number,
   source: ExportSource = 'manual-sync',
-  isCancelled?: () => boolean,
+  isCancelled?: () => boolean
 ): Promise<AutoExportResult> {
-  const formats = getAutoExportFormats().filter((format) => AGGREGATE_FORMATS.includes(format));
+  const formats = getAutoExportFormats().filter(format => AGGREGATE_FORMATS.includes(format));
   if (formats.length === 0) {
     return createEmptyExportResult(formats);
   }
@@ -1149,7 +1237,7 @@ async function convertToFormat(
   format: AutoExportFormat,
   cgiData: any,
   getCache: () => string | null,
-  setCache: (html: string) => Promise<void>,
+  setCache: (html: string) => Promise<void>
 ): Promise<Buffer> {
   switch (format) {
     case 'word': {
@@ -1191,8 +1279,9 @@ async function fetchArticleHtml(url: string, context?: string): Promise<string |
     await waitRandomArticleFetchDelay(`[docx-generator] ${context || '发起文章抓取'} | ${url}`);
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       },
       redirect: 'follow',

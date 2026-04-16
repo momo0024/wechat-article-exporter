@@ -468,14 +468,14 @@ async function handleInfoPost(pool: any, action: string, body: any) {
           mpAccount.count = 0;
           mpAccount.articles = 0;
           mpAccount.total_count = 0;
-          mpAccount.is_interface = mpAccount.is_interface ?? false;
+          mpAccount.is_interface = false;
           mpAccount.status = null;
           mpAccount.is_delete = mpAccount.is_delete ?? false;
           mpAccount.create_time = undefined;
           mpAccount.update_time = undefined;
           mpAccount.last_update_time = undefined;
           await upsertInfo(client, mpAccount);
-          await client.query(`UPDATE info SET status = NULL WHERE fakeid = $1`, [mpAccount.fakeid]);
+          await client.query(`UPDATE info SET status = NULL, is_interface = FALSE WHERE fakeid = $1`, [mpAccount.fakeid]);
         }
         await client.query('COMMIT');
         return { success: true };

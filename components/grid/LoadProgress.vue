@@ -1,45 +1,54 @@
 <script setup lang="ts">
 import type { ICellRendererParams } from 'ag-grid-community';
-import { getAccountSyncStatusLabel, normalizeAccountSyncStatus } from '~/shared/utils/account-sync-status';
+import type { Ref } from 'vue';
+import { getManualSyncProgressClass, getManualSyncProgressText, type ManualSyncJobStatus } from '~/shared/utils/manual-sync';
 
 interface Props {
-  params: ICellRendererParams;
+  params: ICellRendererParams & {
+    syncingRowId?: string | null | Ref<string | null>;
+    syncStatus?: ManualSyncJobStatus | null | Ref<ManualSyncJobStatus | null>;
+  };
 }
 const props = defineProps<Props>();
 
+function unwrap<T>(value: T | Ref<T>): T {
+  return isRef(value) ? value.value : value;
+}
+
+function resolveTotalCount(data: Record<string, any>, status: ManualSyncJobStatus | null): number {
+  const totalCount = Number(data.total_count || 0) || Number(status?.totalCount || 0);
+  return Math.max(totalCount, 1);
+}
+
 const count = ref(props.params.data.count);
-const total = ref(Math.max(Number(props.params.data.total_count || 0), 1));
-const status = ref(normalizeAccountSyncStatus(props.params.data.status));
+const total = ref(resolveTotalCount(props.params.data, null));
+
+const currentSyncStatus = computed(() => unwrap(props.params.syncStatus ?? null));
+const isCurrentRowSyncing = computed(() => props.params.node.id === unwrap(props.params.syncingRowId ?? null));
 
 const progressText = computed(() => {
-  const baseText = getAccountSyncStatusLabel(status.value);
-  if (status.value === 'success') {
-    return `${baseText} · ${count.value}/${Math.max(total.value, count.value, 1)}`;
+  if (!isCurrentRowSyncing.value) {
+    return '';
   }
-  return baseText;
+
+  return getManualSyncProgressText(currentSyncStatus.value);
 });
 
-const progressTextClass = computed(() => {
-  if (status.value === 'failed') return 'text-rose-600';
-  if (status.value === 'success') return 'text-emerald-600';
-  if (status.value === 'syncing') return 'text-amber-600';
-  return 'text-slate-500';
-});
+const progressTextClass = computed(() => getManualSyncProgressClass(currentSyncStatus.value));
 
 function refresh(params: ICellRendererParams): boolean {
   count.value = params.data.count;
-  total.value = Math.max(Number(params.data.total_count || 0), 1);
-  status.value = normalizeAccountSyncStatus(params.data.status);
+  total.value = resolveTotalCount(params.data, currentSyncStatus.value);
   return true;
 }
 </script>
 
 <template>
-  <div class="flex h-full w-full flex-col justify-center gap-1 overflow-hidden px-2 py-1">
-    <UProgress class="w-full self-center" color="sky" :value="count" :max="total" />
+  <div class="flex min-h-[48px] w-full flex-col justify-center gap-1 overflow-hidden py-1">
+    <UProgress color="sky" :value="count" :max="total" indicator />
     <div
       v-if="progressText"
-      class="max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-center text-[11px] leading-4"
+      class="max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-[11px] leading-4"
       :class="progressTextClass"
     >
       {{ progressText }}
