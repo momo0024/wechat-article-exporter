@@ -22,7 +22,7 @@ export default defineEventHandler(async (event) => {
     console.warn('[auto-export] AUTO_EXPORT_FORMATS 未配置有效格式');
     throw createError({
       statusCode: 500,
-      message: 'AUTO_EXPORT_FORMATS 未配置有效格式（支持: html,txt,markdown,word,json,excel）',
+      message: 'AUTO_EXPORT_FORMATS 未配置有效格式（支持: html,txt,markdown,word,pdf,json,excel）',
     });
   }
 

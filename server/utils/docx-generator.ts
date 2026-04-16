@@ -11,15 +11,16 @@ import { getPool } from '~/server/db/postgres';
 import { notifyArticleAccessTooFrequent, waitRandomArticleFetchDelay } from '~/server/utils/article-fetch';
 import { getPreferencesFromDB } from '~/server/utils/preferences';
 import { isArticleAccessTooFrequentMessage, isPolicyViolationMessage, validateHTMLContent } from '~/shared/utils/html';
+import { injectPdfStyleTag } from '~/utils/download/pdf-helpers';
 
 // ==================== 支持的导出格式 ====================
 
-export type AutoExportFormat = 'html' | 'txt' | 'markdown' | 'word' | 'json' | 'excel';
+export type AutoExportFormat = 'html' | 'txt' | 'markdown' | 'word' | 'pdf' | 'json' | 'excel';
 
-const VALID_FORMATS: AutoExportFormat[] = ['html', 'txt', 'markdown', 'word', 'json', 'excel'];
+const VALID_FORMATS: AutoExportFormat[] = ['html', 'txt', 'markdown', 'word', 'pdf', 'json', 'excel'];
 
 // 每篇文章单独生成文件的格式
-const PER_ARTICLE_FORMATS: AutoExportFormat[] = ['html', 'txt', 'markdown', 'word'];
+const PER_ARTICLE_FORMATS: AutoExportFormat[] = ['html', 'txt', 'markdown', 'word', 'pdf'];
 // 整个公众号汇总为单个文件的格式
 const AGGREGATE_FORMATS: AutoExportFormat[] = ['json', 'excel'];
 
@@ -28,6 +29,7 @@ const FORMAT_EXT: Record<AutoExportFormat, string> = {
   txt: '.txt',
   markdown: '.md',
   word: '.docx',
+  pdf: '.pdf',
   json: '.json',
   excel: '.xlsx',
 };
@@ -560,6 +562,15 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.promises.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface AutoExportResult {
   total: number;
   generated: number;
@@ -621,6 +632,38 @@ function createEmptyExportResult(formats: AutoExportFormat[]): AutoExportResult 
     formats,
     errors: [],
   };
+}
+
+async function htmlToPdfBuffer(html: string): Promise<Buffer> {
+  let getBrowser: Awaited<typeof import('~/server/utils/puppeteer')>['getBrowser'];
+  try {
+    getBrowser = (await import('~/server/utils/puppeteer')).getBrowser;
+  } catch {
+    throw new Error('当前部署环境不支持 PDF 导出，请使用 Docker 部署');
+  }
+
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+
+  try {
+    await page.setViewport({ width: 794, height: 1123 });
+    await page.setContent(html, { waitUntil: 'load', timeout: 60_000 });
+
+    const contentHeight = await page.evaluate(
+      () => Math.max(document.body.scrollHeight, document.body.offsetHeight, document.documentElement.scrollHeight, document.documentElement.offsetHeight),
+    );
+
+    const pdfBuffer = await page.pdf({
+      width: '210mm',
+      height: `${contentHeight}px`,
+      printBackground: true,
+      margin: { top: '0', bottom: '0', left: '0', right: '0' },
+    });
+
+    return Buffer.from(pdfBuffer);
+  } finally {
+    await page.close();
+  }
 }
 
 async function queryArticlesForExport(
@@ -693,7 +736,7 @@ async function generateDocxForAccountInternal(
 
   const formats = options.formats || getAutoExportFormats();
   if (formats.length === 0) {
-    throw new Error('AUTO_EXPORT_FORMATS 未配置有效格式（支持: html,txt,markdown,word,json,excel）');
+    throw new Error('AUTO_EXPORT_FORMATS 未配置有效格式（支持: html,txt,markdown,word,pdf,json,excel）');
   }
 
   const pool = getPool();
@@ -725,7 +768,7 @@ async function generateDocxForAccountInternal(
 
   // 3. 确保输出目录存在
   const accountDir = path.resolve(outputDir, safeDirName);
-  fs.mkdirSync(accountDir, { recursive: true });
+  await fs.promises.mkdir(accountDir, { recursive: true });
   console.log(`${tag} 公众号：【${accountName}】输出目录已就绪: ${accountDir}`);
 
   // 4. 区分逐篇格式和汇总格式
@@ -767,12 +810,17 @@ async function generateDocxForAccountInternal(
       );
 
       // 检查是否所有格式的文件都已存在
-      const missingFormats = forceDownloadContent
-        ? [...perArticleFormats]
-        : perArticleFormats.filter(fmt => {
-            const filePath = path.join(accountDir, `${fileBaseName}${FORMAT_EXT[fmt]}`);
-            return !fs.existsSync(filePath);
-          });
+      const missingFormats: AutoExportFormat[] = [];
+      if (forceDownloadContent) {
+        missingFormats.push(...perArticleFormats);
+      } else {
+        for (const fmt of perArticleFormats) {
+          const filePath = path.join(accountDir, `${fileBaseName}${FORMAT_EXT[fmt]}`);
+          if (!(await pathExists(filePath))) {
+            missingFormats.push(fmt);
+          }
+        }
+      }
 
       if (missingFormats.length === 0) {
         result.skipped++;
@@ -1019,7 +1067,7 @@ async function generateDocxForAccountInternal(
               renderedHtml = html;
             }
           );
-          fs.writeFileSync(filePath, buf);
+          await fs.promises.writeFile(filePath, buf);
           articleGenerated = true;
           console.log(`${tag} 公众号：【${accountName}】生成成功: ${fileBaseName}${FORMAT_EXT[fmt]}`);
         } catch (e: any) {
@@ -1036,6 +1084,8 @@ async function generateDocxForAccountInternal(
         result.failed++;
         failedUrls.push({ title, url, reason: '所有格式生成失败' });
       }
+
+      await delay(0);
     }
   }
 
@@ -1070,13 +1120,13 @@ async function generateDocxForAccountInternal(
       try {
         if (fmt === 'json') {
           const jsonStr = JSON.stringify(exportEntities, null, 2);
-          fs.writeFileSync(filePath, jsonStr, 'utf-8');
+          await fs.promises.writeFile(filePath, jsonStr, 'utf-8');
           console.log(
             `${tag} 公众号：【${accountName}】JSON 汇总生成成功: ${safeDirName}${FORMAT_EXT[fmt]}（${exportEntities.length} 篇）`
           );
         } else if (fmt === 'excel') {
           const buf = await generateExcelBuffer(exportEntities);
-          fs.writeFileSync(filePath, buf);
+          await fs.promises.writeFile(filePath, buf);
           console.log(
             `${tag} 公众号：【${accountName}】Excel 汇总生成成功: ${safeDirName}${FORMAT_EXT[fmt]}（${exportEntities.length} 篇）`
           );
@@ -1264,6 +1314,14 @@ async function convertToFormat(
       }
       const markdown = turndownService.turndown(html);
       return Buffer.from(markdown, 'utf-8');
+    }
+    case 'pdf': {
+      let html = getCache();
+      if (!html) {
+        html = await renderHTMLFromCgiData(cgiData);
+        await setCache(html);
+      }
+      return htmlToPdfBuffer(injectPdfStyleTag(html));
     }
     default:
       throw new Error(`不支持的导出格式: ${format}`);

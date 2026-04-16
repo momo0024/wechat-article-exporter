@@ -109,10 +109,23 @@ async function handleArticleGet(pool: any, action: string, query: any) {
     case 'getCache': {
       const { fakeid, update_time } = query;
       const res = await pool.query(
-        `SELECT data FROM article WHERE fakeid = $1 AND COALESCE(update_time, create_time) < $2 ORDER BY COALESCE(update_time, create_time) DESC`,
+        `SELECT
+           article.data,
+           EXISTS (SELECT 1 FROM html WHERE html.url = article.link) AS content_download,
+           EXISTS (SELECT 1 FROM comment WHERE comment.url = article.link) AS comment_download,
+           metadata.data AS metadata
+         FROM article
+         LEFT JOIN metadata ON metadata.url = article.link
+         WHERE article.fakeid = $1 AND COALESCE(article.update_time, article.create_time) < $2
+         ORDER BY COALESCE(article.update_time, article.create_time) DESC`,
         [fakeid, Number(update_time)]
       );
-      return res.rows.map((r: any) => r.data);
+      return res.rows.map((row: any) => ({
+        ...row.data,
+        ...(row.metadata || {}),
+        contentDownload: row.content_download === true,
+        commentDownload: row.comment_download === true,
+      }));
     }
     case 'byLink': {
       const { url } = query;
@@ -150,10 +163,6 @@ async function handleArticlePost(pool: any, action: string, body: any) {
         const fakeid = account.fakeid;
         const totalCount = publishPage.total_count;
         const publishList = publishPage.publish_list.filter((item: any) => !!item.publish_info);
-
-        // 获取现有 keys
-        const keysRes = await client.query(`SELECT id FROM article`);
-        const existingKeys = new Set(keysRes.rows.map((r: any) => r.id));
 
         let msgCount = 0;
         let articleCount = 0;

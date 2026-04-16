@@ -1,7 +1,13 @@
 import type { AppMsgExWithFakeID, PublishPage } from '~/types/types';
+import type { ArticleMetadata } from '~/utils/download/types';
 import type { MpAccount } from './info';
 
 export type ArticleAsset = AppMsgExWithFakeID;
+export type CachedArticleAsset = AppMsgExWithFakeID &
+  Partial<ArticleMetadata> & {
+    contentDownload?: boolean;
+    commentDownload?: boolean;
+  };
 
 /**
  * 更新文章缓存
@@ -36,8 +42,8 @@ export async function hitCache(fakeid: string, update_time: number): Promise<boo
 /**
  * 读取缓存中的指定更新时间之前的历史文章
  */
-export async function getArticleCache(fakeid: string, update_time: number): Promise<AppMsgExWithFakeID[]> {
-  return await $fetch<AppMsgExWithFakeID[]>('/api/store/article', {
+export async function getArticleCache(fakeid: string, update_time: number): Promise<CachedArticleAsset[]> {
+  return await $fetch<CachedArticleAsset[]>('/api/store/article', {
     query: { action: 'getCache', fakeid, update_time },
   });
 }

@@ -50,6 +50,18 @@ export interface ExporterStatus {
   proxy: Map<string, ProxyStatus>;
 }
 
+export interface ExportFailure {
+  url: string;
+  reason: string;
+}
+
+export interface ExportRunResult {
+  elapsedSeconds: number;
+  completedFiles: string[];
+  failedFiles: ExportFailure[];
+  status: ExporterStatus;
+}
+
 export interface ArticleMetadata {
   // 阅读
   readNum: number;

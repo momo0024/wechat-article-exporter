@@ -1,7 +1,8 @@
 import { formatElapsedTime } from '#shared/utils/helpers';
 import toastFactory from '~/composables/toast';
+import { buildExportFeedback } from '~/utils/download/export-feedback';
 import { Exporter } from '~/utils/download/Exporter';
-import type { ExporterStatus } from '~/utils/download/types';
+import type { ExportRunResult, ExporterStatus } from '~/utils/download/types';
 
 export default () => {
   const toast = toastFactory();
@@ -10,6 +11,19 @@ export default () => {
   const phase = ref('导出中');
   const completed_count = ref(0);
   const total_count = ref(0);
+
+  function notifyExportResult(formatLabel: string, result: ExportRunResult) {
+    const feedback = buildExportFeedback(formatLabel, formatElapsedTime(result.elapsedSeconds), result);
+    if (feedback.level === 'success') {
+      toast.success(feedback.title, feedback.description);
+      return;
+    }
+    if (feedback.level === 'warning') {
+      toast.warning(feedback.title, feedback.description);
+      return;
+    }
+    toast.error(feedback.title, feedback.description);
+  }
 
   // 导出 excel
   async function export2excel(urls: string[]) {
@@ -30,17 +44,13 @@ export default () => {
     manager.on('export:progress', (num: number) => {
       completed_count.value = num;
     });
-    manager.on('export:finish', (seconds: number) => {
-      console.debug('耗时:', formatElapsedTime(seconds));
-      toast.success('Excel 导出完成', `本次导出耗时 ${formatElapsedTime(seconds)}`);
-    });
-
     try {
       loading.value = true;
-      await manager.startExport('excel');
+      const result = await manager.startExport('excel');
+      notifyExportResult('Excel', result);
     } catch (error) {
       console.error('导出任务失败:', error);
-      alert((error as Error).message);
+      toast.error('Excel 导出失败', (error as Error).message);
     } finally {
       loading.value = false;
     }
@@ -65,17 +75,13 @@ export default () => {
     manager.on('export:progress', (num: number) => {
       completed_count.value = num;
     });
-    manager.on('export:finish', (seconds: number) => {
-      console.debug('耗时:', formatElapsedTime(seconds));
-      toast.success('Json 导出完成', `本次导出耗时 ${formatElapsedTime(seconds)}`);
-    });
-
     try {
       loading.value = true;
-      await manager.startExport('json');
+      const result = await manager.startExport('json');
+      notifyExportResult('Json', result);
     } catch (error) {
       console.error('导出任务失败:', error);
-      alert((error as Error).message);
+      toast.error('Json 导出失败', (error as Error).message);
     } finally {
       loading.value = false;
     }
@@ -110,17 +116,13 @@ export default () => {
     manager.on('export:write:progress', (index: number) => {
       completed_count.value = index;
     });
-    manager.on('export:finish', (seconds: number) => {
-      console.debug('耗时:', formatElapsedTime(seconds));
-      toast.success('HTML 导出完成', `本次导出耗时 ${formatElapsedTime(seconds)}`);
-    });
-
     try {
       loading.value = true;
-      await manager.startExport('html');
+      const result = await manager.startExport('html');
+      notifyExportResult('HTML', result);
     } catch (error) {
       console.error('导出任务失败:', error);
-      alert((error as Error).message);
+      toast.error('HTML 导出失败', (error as Error).message);
     } finally {
       loading.value = false;
     }
@@ -147,17 +149,13 @@ export default () => {
     manager.on('export:progress', (index: number) => {
       completed_count.value = index;
     });
-    manager.on('export:finish', (seconds: number) => {
-      console.debug('耗时:', formatElapsedTime(seconds));
-      toast.success('Txt 导出完成', `本次导出耗时 ${formatElapsedTime(seconds)}`);
-    });
-
     try {
       loading.value = true;
-      await manager.startExport('txt');
+      const result = await manager.startExport('txt');
+      notifyExportResult('Txt', result);
     } catch (error) {
       console.error('导出任务失败:', error);
-      alert((error as Error).message);
+      toast.error('Txt 导出失败', (error as Error).message);
     } finally {
       loading.value = false;
     }
@@ -184,17 +182,13 @@ export default () => {
     manager.on('export:progress', (index: number) => {
       completed_count.value = index;
     });
-    manager.on('export:finish', (seconds: number) => {
-      console.debug('耗时:', formatElapsedTime(seconds));
-      toast.success('Markdown 导出完成', `本次导出耗时 ${formatElapsedTime(seconds)}`);
-    });
-
     try {
       loading.value = true;
-      await manager.startExport('markdown');
+      const result = await manager.startExport('markdown');
+      notifyExportResult('Markdown', result);
     } catch (error) {
       console.error('导出任务失败:', error);
-      alert((error as Error).message);
+      toast.error('Markdown 导出失败', (error as Error).message);
     } finally {
       loading.value = false;
     }
@@ -221,17 +215,13 @@ export default () => {
     manager.on('export:progress', (index: number) => {
       completed_count.value = index;
     });
-    manager.on('export:finish', (seconds: number) => {
-      console.debug('耗时:', formatElapsedTime(seconds));
-      toast.success('Word 导出完成', `本次导出耗时 ${formatElapsedTime(seconds)}`);
-    });
-
     try {
       loading.value = true;
-      await manager.startExport('word');
+      const result = await manager.startExport('word');
+      notifyExportResult('Word', result);
     } catch (error) {
       console.error('导出任务失败:', error);
-      alert((error as Error).message);
+      toast.error('Word 导出失败', (error as Error).message);
     } finally {
       loading.value = false;
     }
@@ -266,17 +256,13 @@ export default () => {
     manager.on('export:write:progress', (index: number) => {
       completed_count.value = index;
     });
-    manager.on('export:finish', (seconds: number) => {
-      console.debug('耗时:', formatElapsedTime(seconds));
-      toast.success('PDF 导出完成', `本次导出耗时 ${formatElapsedTime(seconds)}`);
-    });
-
     try {
       loading.value = true;
-      await manager.startExport('pdf');
+      const result = await manager.startExport('pdf');
+      notifyExportResult('PDF', result);
     } catch (error) {
       console.error('导出任务失败:', error);
-      alert((error as Error).message);
+      toast.error('PDF 导出失败', (error as Error).message);
     } finally {
       loading.value = false;
     }

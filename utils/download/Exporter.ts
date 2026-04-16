@@ -5,6 +5,7 @@ import { filterInvalidFilenameChars, sleep } from '#shared/utils/helpers';
 import { parseCgiDataNew } from '#shared/utils/html';
 import { renderHTMLFromCgiDataNew, renderTextFromCgiDataNew } from '#shared/utils/renderer';
 import usePreferences from '~/composables/usePreferences';
+import { injectPdfStyleTag, needsRenderedHtmlFallback } from '~/utils/download/pdf-helpers';
 import { getArticleByLink } from '~/store/v2/article';
 import { getHtmlCache, type HtmlAsset } from '~/store/v2/html';
 import { getAccountNameByFakeid, getAllInfo, type MpAccount } from '~/store/v2/info';
@@ -15,7 +16,7 @@ import type { Preferences } from '~/types/preferences';
 import { getArticleComments, renderComments } from '~/utils/comment';
 import { BaseDownloader } from '~/utils/download/BaseDownloader';
 import { type ExcelExportEntity, export2ExcelFile, export2JsonFile } from '~/utils/exporter';
-import type { DownloadOptions } from './types';
+import type { DownloadOptions, ExportRunResult } from './types';
 
 // 导出类型
 type ExportType = 'excel' | 'json' | 'html' | 'txt' | 'markdown' | 'word' | 'pdf';
@@ -29,14 +30,18 @@ export class Exporter extends BaseDownloader {
   // 导出的根目录
   private exportRootDirectoryHandle: FileSystemDirectoryHandle | null = null;
   private readonly resources: Set<{ url: string; fakeid: string }>;
+  private readonly completedFiles: Set<string>;
+  private readonly failedFiles: Map<string, string>;
 
   constructor(urls: string[], options: DownloadOptions = {}) {
     super(urls, options);
     this.resources = new Set();
+    this.completedFiles = new Set();
+    this.failedFiles = new Map();
   }
 
   // 启动导出任务
-  public async startExport(type: ExportType = 'html') {
+  public async startExport(type: ExportType = 'html'): Promise<ExportRunResult> {
     if (this.isRunning) {
       throw new Error('导出任务正在运行中，无需重复启动');
     }
@@ -47,16 +52,19 @@ export class Exporter extends BaseDownloader {
         await this.acquireExportDirectoryHandle();
       } catch (err) {
         console.error(err);
-        return;
+        throw err instanceof Error ? err : new Error('选择导出目录失败');
       }
     }
 
     this.exportType = type;
     this.isRunning = true;
+    this.completedFiles.clear();
+    this.failedFiles.clear();
     const start = Date.now();
     this.emit('export:begin');
 
     this.allAccountInfo = await getAllInfo();
+    let thrownError: unknown;
 
     try {
       if (this.exportType === 'excel') {
@@ -90,12 +98,41 @@ export class Exporter extends BaseDownloader {
         // 3. 将资源以 data URL 嵌入，生成 PDF 文件
         await this.exportPdfFiles();
       }
+    } catch (error) {
+      thrownError = error;
     } finally {
       this.isRunning = false;
       const elapse = Math.round((Date.now() - start) / 1000);
-      this.emit('export:finish', elapse);
+      const result = this.buildRunResult(elapse);
+      this.emit('export:finish', elapse, result);
       this.cancelAllPending();
+
+      if (thrownError) {
+        throw thrownError;
+      }
+
+      return result;
     }
+  }
+
+  private buildRunResult(elapsedSeconds: number): ExportRunResult {
+    return {
+      elapsedSeconds,
+      completedFiles: Array.from(this.completedFiles),
+      failedFiles: Array.from(this.failedFiles.entries()).map(([url, reason]) => ({ url, reason })),
+      status: this.getStatus(),
+    };
+  }
+
+  private recordExportSuccess(url: string) {
+    this.failedFiles.delete(url);
+    this.completedFiles.add(url);
+  }
+
+  private recordExportFailure(url: string, error: unknown) {
+    const reason = error instanceof Error ? error.message : String(error || 'unknown error');
+    this.completedFiles.delete(url);
+    this.failedFiles.set(url, reason);
   }
 
   // 提取出 html 中的子资源，并保存在 resource-map 表中
@@ -209,10 +246,13 @@ export class Exporter extends BaseDownloader {
         const url = queue.pop()!;
         const promise = task(url)
           .then(() => {
+            this.recordExportSuccess(url);
             completedCount++;
             this.emit(progressEvent, completedCount);
           })
           .catch(e => {
+            this.failed.add(url);
+            this.recordExportFailure(url, e);
             console.error(`导出文件失败(url: ${url}):`, e);
             completedCount++;
             this.emit(progressEvent, completedCount);
@@ -295,6 +335,7 @@ export class Exporter extends BaseDownloader {
     }
 
     await export2ExcelFile(data, '微信公众号文章');
+    this.urls.forEach(url => this.recordExportSuccess(url));
   }
 
   // 导出 json 文件
@@ -333,6 +374,7 @@ export class Exporter extends BaseDownloader {
     }
 
     await export2JsonFile(data, '微信公众号文章');
+    this.urls.forEach(url => this.recordExportSuccess(url));
   }
 
   // 导出 html 文件（并发处理）
@@ -346,8 +388,7 @@ export class Exporter extends BaseDownloader {
       async url => {
         const cached = await getHtmlCache(url);
         if (!cached) {
-          console.warn(`文章(url: ${url} )的 html 还未下载，不能导出`);
-          return;
+          throw new Error(`文章(url: ${url})的 HTML 尚未下载，不能导出 HTML`);
         }
 
         const dirname = await this.exportDirName(cached.url);
@@ -356,8 +397,7 @@ export class Exporter extends BaseDownloader {
         const html = await cached.file.text();
         const resourceMap = await getResourceMapCache(url);
         if (!resourceMap) {
-          console.warn(`文章(url: ${url} )的 resource-map 缺失，无法导出`);
-          return;
+          throw new Error(`文章(url: ${url})的资源映射缺失，无法导出 HTML`);
         }
 
         const urlmap = new Map<string, string>();
@@ -395,7 +435,9 @@ export class Exporter extends BaseDownloader {
       console.log(`开始导出: ${filename}(${url})`);
 
       const content = await this.getRenderedText(url);
-      if (!content) return;
+      if (!content) {
+        throw new Error(`文章(url: ${url})内容为空，不能导出 Txt`);
+      }
 
       const blob = new Blob([content], { type: 'text/plain' });
       await this.writeFile(filename + '.txt', blob);
@@ -415,7 +457,9 @@ export class Exporter extends BaseDownloader {
       console.log(`开始导出: ${filename}(${url})`);
 
       const content = await this.getRenderedHTML(url);
-      if (!content) return;
+      if (!content) {
+        throw new Error(`文章(url: ${url})内容为空，不能导出 Markdown`);
+      }
       const markdown = turndownService.turndown(content);
 
       const blob = new Blob([markdown], { type: 'text/markdown' });
@@ -434,7 +478,9 @@ export class Exporter extends BaseDownloader {
       console.log(`开始导出: ${filename}(${url})`);
 
       const content = await this.getRenderedHTML(url);
-      if (!content) return;
+      if (!content) {
+        throw new Error(`文章(url: ${url})内容为空，不能导出 Word`);
+      }
       const blob = window.htmlDocx.asBlob(content) as Blob;
 
       await this.writeFile(filename + '.docx', blob);
@@ -456,8 +502,7 @@ export class Exporter extends BaseDownloader {
       async (url) => {
         const cached = await getHtmlCache(url);
         if (!cached) {
-          console.warn(`文章(url: ${url} )的 html 还未下载，不能导出`);
-          return;
+          throw new Error(`文章(url: ${url})的 HTML 尚未下载，不能导出 PDF`);
         }
 
         const filename = await this.exportDirName(url);
@@ -477,20 +522,14 @@ export class Exporter extends BaseDownloader {
 
         let finalHtml = await this.normalizeHtml(cached, html, urlmap);
 
-        const doc = new DOMParser().parseFromString(finalHtml, 'text/html');
-        const jsContentText = doc.querySelector('#js_content')?.textContent?.replace(/[\s\u00A0]+/g, '') || '';
-        if (!jsContentText) {
+        if (needsRenderedHtmlFallback(finalHtml)) {
           const renderedHTML = await this.getRenderedHTML(url, true);
           if (renderedHTML) {
             finalHtml = renderedHTML;
           }
         }
 
-        const pdfStyleTag = `<style>
-  html, body { background: white !important; background-color: white !important; }
-  p { margin-block: 0.3em !important; }
-</style>`;
-        finalHtml = finalHtml.replace('</head>', `${pdfStyleTag}\n</head>`);
+        finalHtml = injectPdfStyleTag(finalHtml);
 
         const response = await fetch('/api/web/pdf/generate', {
           method: 'POST',
@@ -503,6 +542,9 @@ export class Exporter extends BaseDownloader {
         }
 
         const pdfBlob = await response.blob();
+        if (pdfBlob.size === 0) {
+          throw new Error('PDF 生成结果为空文件');
+        }
         await this.writeFile(filename + '.pdf', pdfBlob);
       },
       { concurrency: 2, progressEvent: 'export:write:progress' },

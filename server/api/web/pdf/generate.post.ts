@@ -11,7 +11,16 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 501, statusMessage: '当前部署环境不支持 PDF 导出，请使用 Docker 部署' });
   }
 
-  const browser = await getBrowser();
+  let browser: Awaited<ReturnType<typeof getBrowser>>;
+  try {
+    browser = await getBrowser();
+  } catch (error) {
+    throw createError({
+      statusCode: 503,
+      statusMessage: error instanceof Error ? error.message : 'PDF 浏览器启动失败',
+    });
+  }
+
   const page = await browser.newPage();
 
   try {

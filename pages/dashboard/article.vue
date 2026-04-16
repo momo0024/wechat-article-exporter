@@ -24,11 +24,8 @@ import AccountSelectorForArticle from '~/components/selector/AccountSelectorForA
 import { isDev, websiteName } from '~/config';
 import { sharedGridOptions } from '~/config/shared-grid-options';
 import { articleDeleted, getArticleCache, updateArticleStatus } from '~/store/v2/article';
-import { getCommentCache } from '~/store/v2/comment';
 import { getDebugCache } from '~/store/v2/debug';
-import { getHtmlCache } from '~/store/v2/html';
 import { type MpAccount } from '~/store/v2/info';
-import { getMetadataCache, type Metadata } from '~/store/v2/metadata';
 import type { Preferences } from '~/types/preferences';
 import type { AppMsgExWithFakeID } from '~/types/types';
 import type { ArticleMetadata } from '~/utils/download/types';
@@ -367,27 +364,12 @@ watch(selectedAccount, newVal => {
 
 async function switchTableData(fakeid: string) {
   loading.value = true;
-  const articles: Article[] = [];
   const data = await getArticleCache(fakeid, Math.floor(Date.now() / 1000));
-  for (const article of data) {
-    const contentDownload = (await getHtmlCache(article.link)) !== undefined;
-    const commentDownload = (await getCommentCache(article.link)) !== undefined;
-    const metadata = await getMetadataCache(article.link);
-    if (metadata) {
-      articles.push({
-        ...metadata,
-        ...article,
-        contentDownload: contentDownload,
-        commentDownload: commentDownload,
-      });
-    } else {
-      articles.push({
-        ...article,
-        contentDownload: contentDownload,
-        commentDownload: commentDownload,
-      });
-    }
-  }
+  const articles: Article[] = data.map(article => ({
+    ...article,
+    contentDownload: article.contentDownload === true,
+    commentDownload: article.commentDownload === true,
+  }));
   await sleep(200);
   globalRowData = articles.filter(article => (hideDeleted.value ? !article.is_deleted : true));
   gridApi.value?.setGridOption('rowData', globalRowData);
