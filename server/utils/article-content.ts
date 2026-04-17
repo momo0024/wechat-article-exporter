@@ -21,6 +21,10 @@ import { compactEscapedJson } from '~/server/utils/async-log';
 
 export type ArticleContentFormat = 'html' | 'markdown' | 'text' | 'json';
 
+export interface ResolveArticleContentOptions {
+  remoteFetchRetries?: number;
+}
+
 export const SUPPORTED_ARTICLE_CONTENT_FORMATS: ArticleContentFormat[] = ['html', 'markdown', 'text', 'json'];
 
 const UNSUPPORTED_MP_ARTICLE_URL_MESSAGE = '该类 mp/appmsg/show 链接不支持抓取';
@@ -35,6 +39,20 @@ export function validateArticleUrl(url: string): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function resolveRemoteFetchRetryCount(options?: ResolveArticleContentOptions): number {
+  const rawValue = options?.remoteFetchRetries;
+  if (rawValue === null || rawValue === undefined) {
+    return RETRY_POLICY.articleContent.retries;
+  }
+
+  const parsedValue = Number(rawValue);
+  if (!Number.isFinite(parsedValue) || parsedValue < 0) {
+    return RETRY_POLICY.articleContent.retries;
+  }
+
+  return Math.floor(parsedValue);
 }
 
 function validateFetchedHtml(html: string): {
@@ -200,12 +218,17 @@ async function fetchRemoteArticleHtml(url: string): Promise<string> {
   return html;
 }
 
-async function fetchValidatedRemoteArticleHtml(url: string, dbArticleStatus: number | null): Promise<RawArticleHtmlResult> {
+async function fetchValidatedRemoteArticleHtml(
+  url: string,
+  dbArticleStatus: number | null,
+  options: ResolveArticleContentOptions = {},
+): Promise<RawArticleHtmlResult> {
   let lastErrorMessage = '获取文章内容失败，请重试';
+  const maxRetries = resolveRemoteFetchRetryCount(options);
 
-  for (let attempt = 0; attempt <= RETRY_POLICY.articleContent.retries; attempt++) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (attempt > 0) {
-      console.warn(`[article-content] 正在重试抓取文章，第 ${attempt}/${RETRY_POLICY.articleContent.retries} 次 | ${url}`);
+      console.warn(`[article-content] 正在重试抓取文章，第 ${attempt}/${maxRetries} 次 | ${url}`);
       await delay(RETRY_POLICY.articleContent.delayMs);
     }
 
@@ -249,7 +272,7 @@ async function fetchValidatedRemoteArticleHtml(url: string, dbArticleStatus: num
       if (isNonRetryableArticleFetchError(error)) {
         throw error;
       }
-      if (attempt === RETRY_POLICY.articleContent.retries) {
+      if (attempt === maxRetries) {
         break;
       }
     }
@@ -258,7 +281,11 @@ async function fetchValidatedRemoteArticleHtml(url: string, dbArticleStatus: num
   throw new Error(lastErrorMessage);
 }
 
-async function getRawArticleHtml(url: string, dbArticleStatus: number | null): Promise<RawArticleHtmlResult> {
+async function getRawArticleHtml(
+  url: string,
+  dbArticleStatus: number | null,
+  options: ResolveArticleContentOptions = {},
+): Promise<RawArticleHtmlResult> {
   const cachedHtml = await getCachedArticleHtml(url);
   if (cachedHtml) {
     const cachedStatus = validateFetchedHtml(cachedHtml);
@@ -290,20 +317,29 @@ async function getRawArticleHtml(url: string, dbArticleStatus: number | null): P
   }
 
   logArticleContent('缓存未命中或不可用，转远端抓取', { url, dbArticleStatus });
-  return await fetchValidatedRemoteArticleHtml(url, dbArticleStatus);
+  return await fetchValidatedRemoteArticleHtml(url, dbArticleStatus, options);
 }
 
-async function parseArticleJson(rawHtml: string, source: 'db' | 'remote', url: string) {
+async function parseArticleJson(
+  rawHtml: string,
+  source: 'db' | 'remote',
+  url: string,
+  options: ResolveArticleContentOptions = {},
+) {
   const cachedData = await parseCgiDataNew(rawHtml);
   if (cachedData || source === 'remote') {
     return cachedData;
   }
 
-  const remoteResult = await fetchValidatedRemoteArticleHtml(url, null);
+  const remoteResult = await fetchValidatedRemoteArticleHtml(url, null, options);
   return await parseCgiDataNew(remoteResult.html);
 }
 
-export async function resolveArticleContent(url: string, format: ArticleContentFormat): Promise<{
+export async function resolveArticleContent(
+  url: string,
+  format: ArticleContentFormat,
+  options: ResolveArticleContentOptions = {},
+): Promise<{
   content: string | Record<string, any> | null;
   contentType: string;
   diagnostics: ArticleContentDiagnostics;
@@ -315,7 +351,7 @@ export async function resolveArticleContent(url: string, format: ArticleContentF
   const dbArticleStatus = await getStoredArticleStatus(url);
   logArticleContent('开始解析文章内容', { url, format, dbArticleStatus });
 
-  const { html, source, validation } = await getRawArticleHtml(url, dbArticleStatus);
+  const { html, source, validation } = await getRawArticleHtml(url, dbArticleStatus, options);
   const diagnostics: ArticleContentDiagnostics = {
     source,
     dbArticleStatus,
@@ -338,7 +374,7 @@ export async function resolveArticleContent(url: string, format: ArticleContentF
   const shouldRenderFromCgiData = diagnostics.htmlSummary.isShellPage;
   let cgiData: any | null = null;
   if (shouldRenderFromCgiData || format === 'json') {
-    cgiData = await parseArticleJson(html, source, url);
+    cgiData = await parseArticleJson(html, source, url, options);
     logArticleContent('cgiData 解析结果', {
       url,
       format,

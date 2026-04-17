@@ -24,6 +24,16 @@ export interface AccountInfoRecord {
   isDelete: boolean;
 }
 
+export interface ListSyncableAccountsOptions {
+  excludeInterface?: boolean;
+  onlyInterface?: boolean;
+}
+
+export interface SqlQuerySpec {
+  sql: string;
+  params: unknown[];
+}
+
 function toBoolean(value: unknown): boolean {
   if (typeof value === 'boolean') {
     return value;
@@ -84,8 +94,7 @@ export async function getAccountInfoRecord(fakeid: string, options: { includeDis
   return mapAccountRow(res.rows[0]);
 }
 
-export async function listSyncableAccounts(options: { excludeInterface?: boolean; onlyInterface?: boolean } = {}): Promise<AccountInfoRecord[]> {
-  const pool = getPool();
+export function buildListSyncableAccountsQuery(options: ListSyncableAccountsOptions = {}): SqlQuerySpec {
   const conditions = ['fakeid IS NOT NULL', 'COALESCE(is_delete, FALSE) = FALSE'];
 
   if (options.onlyInterface) {
@@ -96,12 +105,20 @@ export async function listSyncableAccounts(options: { excludeInterface?: boolean
     conditions.push('COALESCE(is_interface, FALSE) = FALSE');
   }
 
-  const res = await pool.query(
-    `SELECT *
+  return {
+    sql: `SELECT *
      FROM info
      WHERE ${conditions.join(' AND ')}
      ORDER BY create_time ASC NULLS LAST, fakeid ASC`,
-  );
+    params: [],
+  };
+}
+
+export async function listSyncableAccounts(options: ListSyncableAccountsOptions = {}): Promise<AccountInfoRecord[]> {
+  const pool = getPool();
+  const query = buildListSyncableAccountsQuery(options);
+
+  const res = await pool.query(query.sql, query.params);
 
   return res.rows.map(mapAccountRow);
 }

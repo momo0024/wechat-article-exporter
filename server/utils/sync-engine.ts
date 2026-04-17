@@ -3,10 +3,10 @@ import type { AppMsgEx, PublishInfo, PublishListItem } from '~/types/types';
 import { getPool } from '~/server/db/postgres';
 import { AccountCookie, cookieStore } from '~/server/utils/CookieStore';
 import { resolveArticleCover, resolveArticleDeleted, resolveArticleDigest } from '~/server/utils/article-record';
-import { compactEscapedJson } from '~/server/utils/async-log';
 import {
   generateAggregateExportsForAccount,
   generateDocxForArticleUrls,
+  isExportYieldRequestedError,
   type ArticleExportProgress,
   type ArticleExportRetryProgress,
   type AutoExportResult,
@@ -160,6 +160,25 @@ function buildYieldResult(
     yieldReason,
     error: 'yielded',
   };
+}
+
+function logYieldCheckpoint(input: {
+  phase: 'pre-page' | 'pre-export' | 'mid-export' | 'pre-finalizing' | 'post-page';
+  reason: SyncYieldReason;
+  fakeid: string;
+  nickname: string;
+  pageNumber: number;
+  begin: number;
+  syncedMessages: number;
+  articleCount: number;
+  failedUrlsCount: number;
+}) {
+  console.log(
+    `[${input.reason === 'preempted' ? 'yield-preempted' : 'yield-slice'}] `
+    + `phase=${input.phase} fakeid=${input.fakeid} nickname=${input.nickname} `
+    + `page=${input.pageNumber} begin=${input.begin} syncedMessages=${input.syncedMessages} `
+    + `articleCount=${input.articleCount} failedUrls=${input.failedUrlsCount}`,
+  );
 }
 
 function parsePublishInfo(item: PublishListItem): PublishInfo {
@@ -361,7 +380,6 @@ async function fetchArticlesPageOnce(
 
   const data = await response.json();
   const tag = `[${source}]`;
-  console.log(`${tag} 微信API原始响应 (fakeid=${fakeid}, begin=${begin}):\n${compactEscapedJson(data)}`);
 
   if (data.base_resp?.ret === 200003) {
     throw new Error('session expired');
@@ -560,6 +578,17 @@ export async function syncAccountByRange(options: SyncAccountOptions): Promise<S
 
       const prePageYieldReason = resolveYieldReason(options, syncedMessages);
       if (prePageYieldReason) {
+        logYieldCheckpoint({
+          phase: 'pre-page',
+          reason: prePageYieldReason,
+          fakeid: options.fakeid,
+          nickname: options.nickname,
+          pageNumber: pageNumber + 1,
+          begin,
+          syncedMessages,
+          articleCount: syncedArticles,
+          failedUrlsCount: failedUrls.length,
+        });
         await touchLastUpdateTime(options.fakeid);
         return buildYieldResult(options, syncedArticles, syncedMessages, failedUrls, exportTotals, prePageYieldReason);
       }
@@ -616,35 +645,98 @@ export async function syncAccountByRange(options: SyncAccountOptions): Promise<S
         syncedMessages += saveResult.msgCount;
         savedMsgCount = saveResult.msgCount;
 
+        await options.onPageFetched?.({
+          begin,
+          pageNumber,
+          rawCount: page.rawCount,
+          articleCount: page.articles.length,
+          filteredCount: filtered.articles.length,
+          savedMsgCount,
+          syncedMessageCount: syncedMessages,
+          totalCount: page.totalCount,
+          completed: page.completed,
+        });
+
+        const preExportYieldReason = resolveYieldReason(options, syncedMessages);
+        if (preExportYieldReason) {
+          logYieldCheckpoint({
+            phase: 'pre-export',
+            reason: preExportYieldReason,
+            fakeid: options.fakeid,
+            nickname: options.nickname,
+            pageNumber,
+            begin,
+            syncedMessages,
+            articleCount: syncedArticles,
+            failedUrlsCount: failedUrls.length,
+          });
+          await touchLastUpdateTime(options.fakeid);
+          return buildYieldResult(options, syncedArticles, syncedMessages, failedUrls, exportTotals, preExportYieldReason);
+        }
+
         if (options.exportDocs !== false && filtered.urls.length > 0) {
           await options.onStageChange?.('exporting');
-          const exportResult = await generateDocxForArticleUrls(
-            options.fakeid,
-            filtered.urls,
-            options.source,
-            options.onExportArticleStart,
-            options.isCancelled,
-            options.onRetry,
-          );
-          mergeExportTotals(exportTotals, exportResult);
-          failedUrls.push(...exportResult.errors);
+          try {
+            const exportResult = await generateDocxForArticleUrls(
+              options.fakeid,
+              filtered.urls,
+              options.source,
+              options.onExportArticleStart,
+              options.isCancelled,
+              options.onRetry,
+              options.shouldYield,
+            );
+            mergeExportTotals(exportTotals, exportResult);
+            failedUrls.push(...exportResult.errors);
+          } catch (error: any) {
+            if (isExportYieldRequestedError(error)) {
+              mergeExportTotals(exportTotals, error.partialResult);
+              failedUrls.push(...error.failedUrls);
+              const exportYieldReason = resolveYieldReason(options, syncedMessages) || 'preempted';
+              logYieldCheckpoint({
+                phase: 'mid-export',
+                reason: exportYieldReason,
+                fakeid: options.fakeid,
+                nickname: options.nickname,
+                pageNumber,
+                begin,
+                syncedMessages,
+                articleCount: syncedArticles,
+                failedUrlsCount: failedUrls.length,
+              });
+              await touchLastUpdateTime(options.fakeid);
+              return buildYieldResult(options, syncedArticles, syncedMessages, failedUrls, exportTotals, exportYieldReason);
+            }
+            throw error;
+          }
         }
+      } else {
+        await options.onPageFetched?.({
+          begin,
+          pageNumber,
+          rawCount: page.rawCount,
+          articleCount: page.articles.length,
+          filteredCount: filtered.articles.length,
+          savedMsgCount,
+          syncedMessageCount: syncedMessages,
+          totalCount: page.totalCount,
+          completed: page.completed,
+        });
       }
-
-      await options.onPageFetched?.({
-        begin,
-        pageNumber,
-        rawCount: page.rawCount,
-        articleCount: page.articles.length,
-        filteredCount: filtered.articles.length,
-        savedMsgCount,
-        syncedMessageCount: syncedMessages,
-        totalCount: page.totalCount,
-        completed: page.completed,
-      });
 
       const postPageYieldReason = resolveYieldReason(options, syncedMessages);
       if (postPageYieldReason) {
+        logYieldCheckpoint({
+          phase: 'post-page',
+          reason: postPageYieldReason,
+          fakeid: options.fakeid,
+          nickname: options.nickname,
+          pageNumber,
+          begin,
+          syncedMessages,
+          articleCount: syncedArticles,
+          failedUrlsCount: failedUrls.length,
+        });
         await touchLastUpdateTime(options.fakeid);
         return buildYieldResult(options, syncedArticles, syncedMessages, failedUrls, exportTotals, postPageYieldReason);
       }
@@ -666,15 +758,55 @@ export async function syncAccountByRange(options: SyncAccountOptions): Promise<S
     await touchLastUpdateTime(options.fakeid);
 
     if (options.exportDocs !== false) {
+      const preFinalizingYieldReason = resolveYieldReason(options, syncedMessages);
+      if (preFinalizingYieldReason) {
+        logYieldCheckpoint({
+          phase: 'pre-finalizing',
+          reason: preFinalizingYieldReason,
+          fakeid: options.fakeid,
+          nickname: options.nickname,
+          pageNumber,
+          begin,
+          syncedMessages,
+          articleCount: syncedArticles,
+          failedUrlsCount: failedUrls.length,
+        });
+        await touchLastUpdateTime(options.fakeid);
+        return buildYieldResult(options, syncedArticles, syncedMessages, failedUrls, exportTotals, preFinalizingYieldReason);
+      }
+
       await options.onStageChange?.('finalizing');
-      const aggregateResult = await generateAggregateExportsForAccount(
-        options.fakeid,
-        options.syncToTimestamp,
-        options.source,
-        options.isCancelled,
-      );
-      mergeExportTotals(exportTotals, aggregateResult);
-      failedUrls.push(...aggregateResult.errors);
+      try {
+        const aggregateResult = await generateAggregateExportsForAccount(
+          options.fakeid,
+          options.syncToTimestamp,
+          options.source,
+          options.isCancelled,
+          options.shouldYield,
+        );
+        mergeExportTotals(exportTotals, aggregateResult);
+        failedUrls.push(...aggregateResult.errors);
+      } catch (error: any) {
+        if (isExportYieldRequestedError(error)) {
+          mergeExportTotals(exportTotals, error.partialResult);
+          failedUrls.push(...error.failedUrls);
+          const finalizingYieldReason = resolveYieldReason(options, syncedMessages) || 'preempted';
+          logYieldCheckpoint({
+            phase: 'pre-finalizing',
+            reason: finalizingYieldReason,
+            fakeid: options.fakeid,
+            nickname: options.nickname,
+            pageNumber,
+            begin,
+            syncedMessages,
+            articleCount: syncedArticles,
+            failedUrlsCount: failedUrls.length,
+          });
+          await touchLastUpdateTime(options.fakeid);
+          return buildYieldResult(options, syncedArticles, syncedMessages, failedUrls, exportTotals, finalizingYieldReason);
+        }
+        throw error;
+      }
     }
 
     return {

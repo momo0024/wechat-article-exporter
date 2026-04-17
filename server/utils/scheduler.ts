@@ -1,6 +1,7 @@
 import { AccountCookie } from '~/server/utils/CookieStore';
-import { listSyncableAccounts } from '~/server/utils/account-info';
+import { buildListSyncableAccountsQuery, listSyncableAccounts } from '~/server/utils/account-info';
 import { enqueueAccountSync } from '~/server/utils/account-sync-queue';
+import { compactEscapedJson } from '~/server/utils/async-log';
 import { sendCookieExpiryWarning, sendSyncReport } from '~/server/utils/email';
 import { getActiveSession, type SyncAccountResult } from '~/server/utils/sync-engine';
 import { getPool } from '~/server/db/postgres';
@@ -88,6 +89,11 @@ export async function runAutoSync(): Promise<void> {
   }
   console.log(`[schedule] 使用 session: ${session.authKey.substring(0, 8)}...`);
 
+  const syncableAccountsQuery = buildListSyncableAccountsQuery();
+  console.log(`[schedule] 查询待同步公众号 SQL: ${compactEscapedJson({
+    sql: syncableAccountsQuery.sql.replace(/\s+/g, ' ').trim(),
+    params: syncableAccountsQuery.params,
+  })}`);
   const accounts = await listSyncableAccounts();
 
   if (accounts.length === 0) {

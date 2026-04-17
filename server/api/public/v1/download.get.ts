@@ -38,7 +38,9 @@ export default defineEventHandler(async event => {
   console.log(`[public-download] 收到请求: ${compactEscapedJson({ url, format })}`);
 
   try {
-    const result = await resolveArticleContent(url, format);
+    const result = await resolveArticleContent(url, format, {
+      remoteFetchRetries: 0,
+    });
     console.log(`[public-download] 返回成功: ${compactEscapedJson({
       url,
       format,

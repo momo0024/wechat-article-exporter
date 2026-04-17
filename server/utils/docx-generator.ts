@@ -615,11 +615,53 @@ interface GenerateDocxInternalOptions {
   onArticleStart?: (progress: ArticleExportProgress) => void | Promise<void>;
   onRetry?: (progress: ArticleExportRetryProgress) => void | Promise<void>;
   isCancelled?: () => boolean;
+  shouldYield?: () => boolean;
 }
 
 function assertNotCancelled(isCancelled?: () => boolean) {
   if (isCancelled?.()) {
     throw new Error('cancelled');
+  }
+}
+
+function cloneExportResult(result: AutoExportResult): AutoExportResult {
+  return {
+    total: result.total,
+    generated: result.generated,
+    skipped: result.skipped,
+    failed: result.failed,
+    formats: [...result.formats],
+    errors: [...result.errors],
+  };
+}
+
+export class ExportYieldRequestedError extends Error {
+  partialResult: AutoExportResult;
+  failedUrls: string[];
+
+  constructor(partialResult: AutoExportResult, failedUrls: string[]) {
+    super('yielded-during-export');
+    this.name = 'ExportYieldRequestedError';
+    this.partialResult = partialResult;
+    this.failedUrls = failedUrls;
+  }
+}
+
+export function isExportYieldRequestedError(error: unknown): error is ExportYieldRequestedError {
+  return error instanceof ExportYieldRequestedError;
+}
+
+function assertExportStillRunnable(
+  options: Pick<GenerateDocxInternalOptions, 'isCancelled' | 'shouldYield'>,
+  partialResult: AutoExportResult,
+  failedUrls: Array<{ title: string; url: string; reason: string }>,
+) {
+  assertNotCancelled(options.isCancelled);
+  if (options.shouldYield?.()) {
+    throw new ExportYieldRequestedError(
+      cloneExportResult(partialResult),
+      failedUrls.map(item => `[${item.reason}] ${item.title} | ${item.url}`),
+    );
   }
 }
 
@@ -747,7 +789,7 @@ async function generateDocxForAccountInternal(
   const tag = `[${options.source}]`;
 
   console.log(`${tag} 公众号：【${fakeid}】开始生成文件，格式: [${formats.join(',')}]，输出目录: ${outputDir}`);
-  assertNotCancelled(options.isCancelled);
+  assertExportStillRunnable(options, result, []);
 
   // 1. 获取公众号名称
   const infoRes = await pool.query(`SELECT nickname FROM info WHERE fakeid = $1`, [fakeid]);
@@ -764,7 +806,7 @@ async function generateDocxForAccountInternal(
       ? `（过滤: >= ${new Date(options.syncToTimestamp * 1000).toLocaleDateString()}）`
       : '（全部）';
   console.log(`${tag} 公众号：【${accountName}】查询到 ${articles.length} 篇文章${syncInfo}（数据来自本地数据库）`);
-  assertNotCancelled(options.isCancelled);
+  assertExportStillRunnable(options, result, []);
 
   // 3. 确保输出目录存在
   const accountDir = path.resolve(outputDir, safeDirName);
@@ -780,7 +822,7 @@ async function generateDocxForAccountInternal(
 
   if (perArticleFormats.length > 0) {
     for (let articleIndex = 0; articleIndex < articles.length; articleIndex++) {
-      assertNotCancelled(options.isCancelled);
+      assertExportStillRunnable(options, result, failedUrls);
 
       const article = articles[articleIndex];
       const title = article.title || '无标题';
@@ -884,7 +926,7 @@ async function generateDocxForAccountInternal(
       if (!rawHtml) {
         console.log(`${tag} 公众号：【${accountName}】HTML 缓存不存在，尝试在线抓取: ${title} | ${url}`);
         for (let attempt = 0; attempt <= RETRY_POLICY.articleExport.retries; attempt++) {
-          assertNotCancelled(options.isCancelled);
+          assertExportStillRunnable(options, result, failedUrls);
           if (attempt > 0) {
             const retryMessage = `正在重试抓取第 ${articleIndex + 1}/${articles.length} 篇《${title}》，第 ${attempt}/${RETRY_POLICY.articleExport.retries} 次`;
             console.warn(
@@ -968,7 +1010,7 @@ async function generateDocxForAccountInternal(
         lastFailureReason = '解析 cgiData 失败';
         // cgiData 解析失败，尝试重新抓取
         for (let attempt = 1; attempt <= RETRY_POLICY.articleExport.retries; attempt++) {
-          assertNotCancelled(options.isCancelled);
+          assertExportStillRunnable(options, result, failedUrls);
           const retryMessage = `正在重试解析第 ${articleIndex + 1}/${articles.length} 篇《${title}》，第 ${attempt}/${RETRY_POLICY.articleExport.retries} 次`;
           console.warn(
             `${tag} 公众号：【${accountName}】${retryMessage}，${RETRY_POLICY.articleExport.delayMs / 1000} 秒后继续 | ${url}`
@@ -1067,7 +1109,7 @@ async function generateDocxForAccountInternal(
       let articleGenerated = false;
 
       for (const fmt of missingFormats) {
-        assertNotCancelled(options.isCancelled);
+        assertExportStillRunnable(options, result, failedUrls);
         const filePath = path.join(accountDir, `${fileBaseName}${FORMAT_EXT[fmt]}`);
         try {
           const buf = await convertToFormat(
@@ -1102,12 +1144,12 @@ async function generateDocxForAccountInternal(
 
   // 6. 汇总格式导出（json/excel）— 每个公众号生成一个汇总文件
   if (aggregateFormats.length > 0) {
-    assertNotCancelled(options.isCancelled);
+    assertExportStillRunnable(options, result, failedUrls);
 
     // 构建导出数据：文章 + 元数据
     const exportEntities: any[] = [];
     for (const article of articles) {
-      assertNotCancelled(options.isCancelled);
+      assertExportStillRunnable(options, result, failedUrls);
       const url = article.link;
       let metadata: ArticleMetadata | null = null;
       if (url) {
@@ -1125,7 +1167,7 @@ async function generateDocxForAccountInternal(
     }
 
     for (const fmt of aggregateFormats) {
-      assertNotCancelled(options.isCancelled);
+      assertExportStillRunnable(options, result, failedUrls);
       const filePath = path.join(accountDir, `${safeDirName}${FORMAT_EXT[fmt]}`);
       // 汇总文件每次同步都重新生成（数据可能有更新）
       try {
@@ -1183,7 +1225,8 @@ export async function generateDocxForArticleUrls(
   source: ExportSource = 'manual-sync',
   onArticleStart?: (progress: ArticleExportProgress) => void | Promise<void>,
   isCancelled?: () => boolean,
-  onRetry?: (progress: ArticleExportRetryProgress) => void | Promise<void>
+  onRetry?: (progress: ArticleExportRetryProgress) => void | Promise<void>,
+  shouldYield?: () => boolean,
 ): Promise<AutoExportResult> {
   const formats = getAutoExportFormats().filter(format => PER_ARTICLE_FORMATS.includes(format));
   if (formats.length === 0) {
@@ -1199,6 +1242,7 @@ export async function generateDocxForArticleUrls(
     onArticleStart,
     onRetry,
     isCancelled,
+    shouldYield,
   });
 }
 
@@ -1206,7 +1250,8 @@ export async function generateAggregateExportsForAccount(
   fakeid: string,
   syncToTimestamp?: number,
   source: ExportSource = 'manual-sync',
-  isCancelled?: () => boolean
+  isCancelled?: () => boolean,
+  shouldYield?: () => boolean,
 ): Promise<AutoExportResult> {
   const formats = getAutoExportFormats().filter(format => AGGREGATE_FORMATS.includes(format));
   if (formats.length === 0) {
@@ -1218,6 +1263,7 @@ export async function generateAggregateExportsForAccount(
     syncToTimestamp,
     formats,
     isCancelled,
+    shouldYield,
   });
 }
 

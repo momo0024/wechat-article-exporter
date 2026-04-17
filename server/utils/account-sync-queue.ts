@@ -8,6 +8,7 @@ import {
   getAccountInfoRecord,
   updateAccountSyncStatus,
 } from '~/server/utils/account-info';
+import { compactEscapedJson } from '~/server/utils/async-log';
 import {
   getActiveSession,
   syncAccountByRange,
@@ -62,6 +63,10 @@ interface QueueTask {
   forceYield: boolean;
   preferredResumeTaskId: string | null;
   resumePriority: number;
+  deferredPriority: number | null;
+  canPreemptActiveTask: boolean;
+  yieldRequestedByTaskId: string | null;
+  yieldRequestedByFakeid: string | null;
 }
 
 const PRIORITY: Record<SyncQueueSource, number> = {
@@ -71,12 +76,42 @@ const PRIORITY: Record<SyncQueueSource, number> = {
 };
 
 const INTERFACE_PREEMPTION_MESSAGE_THRESHOLD = 40;
+const DEFERRED_INTERFACE_PRIORITY = PRIORITY.schedule + 1;
 
 const taskByFakeid = new Map<string, QueueTask>();
 const pendingTasks: QueueTask[] = [];
 let activeTask: QueueTask | null = null;
 let taskOrder = 0;
 let queueDraining = false;
+
+function describeTask(task: QueueTask | null) {
+  if (!task) {
+    return null;
+  }
+
+  return {
+    id: task.id,
+    fakeid: task.fakeid,
+    nickname: task.nickname,
+    source: task.source,
+    priority: task.priority,
+    effectivePriority: getEffectivePriority(task),
+    order: task.order,
+    syncedMessageCount: task.syncedMessageCount,
+    yieldAfterMessages: task.yieldAfterMessages,
+    forceYield: task.forceYield,
+    preferredResumeTaskId: task.preferredResumeTaskId,
+    resumePriority: task.resumePriority,
+    deferredPriority: task.deferredPriority,
+    canPreemptActiveTask: task.canPreemptActiveTask,
+    yieldRequestedByTaskId: task.yieldRequestedByTaskId,
+    yieldRequestedByFakeid: task.yieldRequestedByFakeid,
+  };
+}
+
+function logQueueEvent(event: string, payload: Record<string, any>) {
+  console.log(`[sync-queue] ${event}: ${compactEscapedJson(payload)}`);
+}
 
 function toExportSource(source: SyncQueueSource): ExportSource {
   if (source === 'manual') {
@@ -128,31 +163,76 @@ async function notifyRetry(task: QueueTask, progress: SyncRetryProgress | Articl
   }
 }
 
+function getEffectivePriority(task: QueueTask): number {
+  return task.deferredPriority ?? task.priority;
+}
+
 function sortPendingTasks() {
   pendingTasks.sort((left, right) => {
     if (left.resumePriority !== right.resumePriority) {
       return left.resumePriority - right.resumePriority;
     }
 
-    if (left.priority !== right.priority) {
-      return left.priority - right.priority;
+    const leftPriority = getEffectivePriority(left);
+    const rightPriority = getEffectivePriority(right);
+    if (leftPriority !== rightPriority) {
+      return leftPriority - rightPriority;
     }
     return left.order - right.order;
   });
 }
 
+function findPendingPreemptibleInterfaceTask(): QueueTask | null {
+  return pendingTasks.find(task => task.source === 'interface' && task.canPreemptActiveTask) || null;
+}
+
+function shouldPreemptScheduleImmediately(task: QueueTask): boolean {
+  return task.source === 'interface' && activeTask?.source === 'schedule';
+}
+
 function tryRequestInterfacePreemption(task: QueueTask) {
-  if (task.source !== 'interface' || !activeTask || activeTask.id === task.id || activeTask.forceYield) {
+  if (task.source !== 'interface' || !task.canPreemptActiveTask || !activeTask || activeTask.id === task.id || activeTask.forceYield) {
     return;
   }
 
-  if (activeTask.syncedMessageCount < INTERFACE_PREEMPTION_MESSAGE_THRESHOLD) {
+  const preemptScheduleImmediately = shouldPreemptScheduleImmediately(task);
+  if (!preemptScheduleImmediately && activeTask.syncedMessageCount < INTERFACE_PREEMPTION_MESSAGE_THRESHOLD) {
+    logQueueEvent('接口任务等待抢占阈值', {
+      threshold: INTERFACE_PREEMPTION_MESSAGE_THRESHOLD,
+      waitingTask: describeTask(task),
+      activeTask: describeTask(activeTask),
+    });
     return;
   }
 
   activeTask.forceYield = true;
+  activeTask.yieldRequestedByTaskId = task.id;
+  activeTask.yieldRequestedByFakeid = task.fakeid;
   task.yieldAfterMessages = Math.max(task.yieldAfterMessages, INTERFACE_PREEMPTION_MESSAGE_THRESHOLD);
   task.preferredResumeTaskId = activeTask.id;
+  task.deferredPriority = null;
+  if (preemptScheduleImmediately) {
+    void updateAccountSyncStatus(activeTask.fakeid, ACCOUNT_SYNC_STATUS.QUEUED);
+    logQueueEvent('定时任务被接口任务立即抢占，先标记为排队中', {
+      waitingTask: describeTask(task),
+      activeTask: describeTask(activeTask),
+    });
+  }
+  logQueueEvent(preemptScheduleImmediately ? '接口任务立即抢占定时任务' : '接口任务触发抢占', {
+    threshold: INTERFACE_PREEMPTION_MESSAGE_THRESHOLD,
+    preemptScheduleImmediately,
+    waitingTask: describeTask(task),
+    activeTask: describeTask(activeTask),
+  });
+}
+
+function reevaluatePendingInterfacePreemption() {
+  const pendingInterfaceTask = findPendingPreemptibleInterfaceTask();
+  if (!pendingInterfaceTask) {
+    return;
+  }
+
+  tryRequestInterfacePreemption(pendingInterfaceTask);
 }
 
 async function runTask(task: QueueTask): Promise<SyncAccountResult> {
@@ -232,6 +312,7 @@ async function runTask(task: QueueTask): Promise<SyncAccountResult> {
     },
     onPageFetched: async (progress) => {
       task.syncedMessageCount = progress.syncedMessageCount;
+      reevaluatePendingInterfacePreemption();
       await notifyPageFetched(task, progress);
     },
     onExportArticleStart: async (progress) => {
@@ -245,12 +326,17 @@ async function runTask(task: QueueTask): Promise<SyncAccountResult> {
 
 async function requeueYieldedTask(task: QueueTask, yieldReason?: SyncYieldReason) {
   const preferredResumeTaskId = task.preferredResumeTaskId;
+  const shouldDeferInterfaceTask = yieldReason === 'message-slice' && Boolean(preferredResumeTaskId);
 
   task.forceYield = false;
   task.syncedMessageCount = 0;
   task.yieldAfterMessages = 0;
   task.preferredResumeTaskId = null;
   task.resumePriority = 0;
+  task.deferredPriority = shouldDeferInterfaceTask ? DEFERRED_INTERFACE_PRIORITY : null;
+  task.canPreemptActiveTask = task.source === 'interface' && !shouldDeferInterfaceTask;
+  task.yieldRequestedByTaskId = null;
+  task.yieldRequestedByFakeid = null;
   task.order = ++taskOrder;
 
   pendingTasks.push(task);
@@ -259,7 +345,15 @@ async function requeueYieldedTask(task: QueueTask, yieldReason?: SyncYieldReason
     const resumeTask = pendingTasks.find(item => item.id === preferredResumeTaskId);
     if (resumeTask) {
       resumeTask.resumePriority = -1;
+      logQueueEvent('安排恢复被打断任务', {
+        resumedTask: describeTask(resumeTask),
+        yieldingInterfaceTask: describeTask(task),
+      });
     }
+    logQueueEvent('接口任务完成 40 条切片后重新排队', {
+      yieldingTask: describeTask(task),
+      preferredResumeTaskId,
+    });
   }
 
   sortPendingTasks();
@@ -281,9 +375,18 @@ async function drainQueue() {
       }
 
       activeTask = nextTask;
-  activeTask.resumePriority = 0;
-  activeTask.forceYield = false;
-  activeTask.syncedMessageCount = 0;
+      const wasResumedTask = activeTask.resumePriority < 0;
+      activeTask.resumePriority = 0;
+      activeTask.deferredPriority = null;
+      activeTask.canPreemptActiveTask = activeTask.source === 'interface';
+      activeTask.forceYield = false;
+      activeTask.syncedMessageCount = 0;
+      activeTask.yieldRequestedByTaskId = null;
+      activeTask.yieldRequestedByFakeid = null;
+      logQueueEvent(wasResumedTask ? '恢复执行被打断任务' : '开始执行队列任务', {
+        activeTask: describeTask(activeTask),
+        pendingTaskCount: pendingTasks.length,
+      });
       await updateAccountSyncStatus(nextTask.fakeid, ACCOUNT_SYNC_STATUS.SYNCING);
       await notifyStage(nextTask, 'syncing');
 
@@ -305,6 +408,13 @@ async function drainQueue() {
       }
 
       if (result.yielded) {
+        logQueueEvent('运行中任务主动让出执行权', {
+          yieldingTask: describeTask(nextTask),
+          yieldReason: result.yieldReason,
+          requestedByTaskId: nextTask.yieldRequestedByTaskId,
+          requestedByFakeid: nextTask.yieldRequestedByFakeid,
+          syncedMessageCount: result.syncedMessageCount,
+        });
         await requeueYieldedTask(nextTask, result.yieldReason);
         activeTask = null;
         continue;
@@ -320,6 +430,14 @@ async function drainQueue() {
         result.success ? ACCOUNT_SYNC_STATUS.SUCCESS : ACCOUNT_SYNC_STATUS.FAILED,
       );
       await notifyStage(nextTask, terminalStage);
+
+      logQueueEvent('队列任务执行结束', {
+        task: describeTask(nextTask),
+        terminalStage,
+        success: result.success,
+        error: result.error || null,
+        yielded: Boolean(result.yielded),
+      });
 
       taskByFakeid.delete(nextTask.fakeid);
       activeTask = null;
@@ -353,6 +471,12 @@ export async function enqueueAccountSync(input: EnqueueAccountSyncInput): Promis
     existingTask.roundHeadImg = input.roundHeadImg || existingTask.roundHeadImg;
     existingTask.syncToTimestamp = normalizeSyncToTimestamp(existingTask.syncToTimestamp, input.syncToTimestamp);
     existingTask.exportDocs = existingTask.exportDocs || input.exportDocs;
+    if (input.source === 'interface') {
+      existingTask.canPreemptActiveTask = true;
+      if (activeTask?.id !== existingTask.id) {
+        existingTask.deferredPriority = null;
+      }
+    }
     existingTask.subscribers.push({
       onStageChange: input.onStageChange,
       onPageFetched: input.onPageFetched,
@@ -366,7 +490,7 @@ export async function enqueueAccountSync(input: EnqueueAccountSyncInput): Promis
       sortPendingTasks();
     }
 
-    tryRequestInterfacePreemption(existingTask);
+    reevaluatePendingInterfacePreemption();
 
     return {
       id: existingTask.id,
@@ -404,14 +528,23 @@ export async function enqueueAccountSync(input: EnqueueAccountSyncInput): Promis
     forceYield: false,
     preferredResumeTaskId: null,
     resumePriority: 0,
+    deferredPriority: null,
+    canPreemptActiveTask: input.source === 'interface',
+    yieldRequestedByTaskId: null,
+    yieldRequestedByFakeid: null,
   };
 
   taskByFakeid.set(task.fakeid, task);
   pendingTasks.push(task);
   sortPendingTasks();
+  logQueueEvent('任务入队', {
+    task: describeTask(task),
+    activeTask: describeTask(activeTask),
+    pendingTaskCount: pendingTasks.length,
+  });
   await updateAccountSyncStatus(task.fakeid, ACCOUNT_SYNC_STATUS.QUEUED);
   await notifyStage(task, 'queued');
-  tryRequestInterfacePreemption(task);
+  reevaluatePendingInterfacePreemption();
   void drainQueue();
 
   return {
