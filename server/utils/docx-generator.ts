@@ -10,7 +10,7 @@ import { RETRY_POLICY } from '~/config';
 import { getPool } from '~/server/db/postgres';
 import { notifyArticleAccessTooFrequent, waitRandomArticleFetchDelay } from '~/server/utils/article-fetch';
 import { getPreferencesFromDB } from '~/server/utils/preferences';
-import { isArticleAccessTooFrequentMessage, isPolicyViolationMessage, validateHTMLContent } from '~/shared/utils/html';
+import { inspectArticleHtml, isArticleAccessTooFrequentMessage, isPolicyViolationMessage, validateHTMLContent } from '~/shared/utils/html';
 import { injectPdfStyleTag } from '~/utils/download/pdf-helpers';
 
 // ==================== 支持的导出格式 ====================
@@ -959,6 +959,11 @@ async function generateDocxForAccountInternal(
 
       // 解析 cgiData（带重试：可能网络抓取到的是临时错误页面）
       cgiData = parseCgiDataNewServer(rawHtml);
+      if (!cgiData && rawHtml && inspectArticleHtml(rawHtml).isShellPage) {
+        result.skipped++;
+        console.log(`${tag} 公众号：【${accountName}】跳过壳页面文章: ${title} — 页面正文未内嵌且无需继续重试 | ${url}`);
+        continue;
+      }
       if (!cgiData && rawHtml) {
         lastFailureReason = '解析 cgiData 失败';
         // cgiData 解析失败，尝试重新抓取
@@ -1014,6 +1019,12 @@ async function generateDocxForAccountInternal(
             }
 
             cgiData = parseCgiDataNewServer(retryHtml);
+            if (!cgiData && inspectArticleHtml(retryHtml).isShellPage) {
+              result.skipped++;
+              skippedDuringParseRetry = true;
+              console.log(`${tag} 公众号：【${accountName}】重试后仍为壳页面，直接跳过: ${title} | ${url}`);
+              break;
+            }
             rawHtml = retryHtml;
             rawHtmlSource = 'remote';
             if (cgiData) {

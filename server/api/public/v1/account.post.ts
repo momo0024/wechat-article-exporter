@@ -1,6 +1,6 @@
 import { getPool } from '~/server/db/postgres';
-import { enqueueAccountSync } from '~/server/utils/account-sync-queue';
 import { getAccountInfoRecord } from '~/server/utils/account-info';
+import { startInterfaceSyncJob } from '~/server/utils/manual-sync-jobs';
 
 interface NormalizedAccountInput {
   fakeid: string;
@@ -138,27 +138,28 @@ export default defineEventHandler(async event => {
       return await getAccountInfoRecord(account.fakeid, { includeDisabled: true });
     }));
     const queuedFakeids: string[] = [];
+    const syncJobs: Array<{ fakeid: string; jobId: string }> = [];
 
     for (const account of savedAccounts) {
       if (!account || account.isDelete) {
         continue;
       }
 
-      await enqueueAccountSync({
-        source: 'interface',
+      const status = await startInterfaceSyncJob({
         fakeid: account.fakeid,
         nickname: account.nickname,
         roundHeadImg: account.roundHeadImg,
         syncToTimestamp: 0,
-        exportDocs: false,
       });
       queuedFakeids.push(account.fakeid);
+      syncJobs.push({ fakeid: account.fakeid, jobId: status.jobId });
     }
 
     return success({
       account: savedAccounts[0],
       accounts: savedAccounts.filter(Boolean),
       queued_fakeids: queuedFakeids,
+      sync_jobs: syncJobs,
     });
   } catch (error: any) {
     return failure(error?.message || '添加公众号失败');

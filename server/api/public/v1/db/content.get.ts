@@ -4,6 +4,7 @@ import {
   validateArticleUrl,
 } from '~/server/utils/article-content';
 import { getPool } from '~/server/db/postgres';
+import { compactEscapedJson } from '~/server/utils/async-log';
 
 function failure(message: string) {
   return {
@@ -50,7 +51,17 @@ export default defineEventHandler(async (event) => {
       return failure('该公众号已被禁用');
     }
 
+    console.log(`[public-db-content] 收到请求: ${compactEscapedJson({ url, format })}`);
     const result = await resolveArticleContent(url, format);
+    console.log(`[public-db-content] 返回成功: ${compactEscapedJson({
+      url,
+      format,
+      source: result.diagnostics.source,
+      dbArticleStatus: result.diagnostics.dbArticleStatus,
+      validationStatus: result.diagnostics.validation.status,
+      validationReason: result.diagnostics.validation.reason,
+      ...result.diagnostics.htmlSummary,
+    })}`);
     if (format === 'json') {
       return result.content;
     }
@@ -62,6 +73,11 @@ export default defineEventHandler(async (event) => {
       },
     });
   } catch (error: any) {
+    console.error(`[public-db-content] 返回失败: ${compactEscapedJson({
+      url,
+      format,
+      error: error?.message || '获取文章内容失败，请重试',
+    })}`);
     return failure(error?.message || '获取文章内容失败，请重试');
   }
 });

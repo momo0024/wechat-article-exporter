@@ -27,7 +27,7 @@ interface AccountStatusBody {
 
 function normalizeFakeids(body: AccountStatusBody): string[] {
   const values = [
-    ...(Array.isArray(body.fakeids) ? body.fakeids : []),
+    ...(Array.isArray(body.fakeids) ? body.fakeids : typeof body.fakeids === 'string' ? [body.fakeids] : []),
     ...(Array.isArray(body.fakeid) ? body.fakeid : body.fakeid ? [body.fakeid] : []),
   ];
 

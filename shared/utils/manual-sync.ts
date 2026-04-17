@@ -10,8 +10,11 @@ export type ManualSyncStage =
   | 'cancelled'
   | 'cancelling';
 
+export type ManualSyncJobSource = 'manual' | 'interface' | 'schedule';
+
 export interface ManualSyncJobStatus {
   jobId: string;
+  source?: ManualSyncJobSource;
   fakeid: string;
   nickname: string;
   stage: ManualSyncStage;
@@ -75,6 +78,10 @@ export function getManualSyncProgressText(
     return withPrefix(status.retryMessage);
   }
 
+  if (status.stage === 'queued') {
+    return withPrefix('正在排队等待同步');
+  }
+
   if (status.stage === 'exporting' && status.currentArticleTitle) {
     return withPrefix(`正在生成 ${status.currentArticleIndex}/${status.currentArticleTotal} ${status.currentArticleTitle}`);
   }
@@ -87,7 +94,7 @@ export function getManualSyncProgressText(
     return withPrefix('正在取消同步');
   }
 
-  if (status.stage === 'queued' || status.stage === 'syncing') {
+  if (status.stage === 'syncing') {
     const matchedCountText = status.currentPageFilteredCount > 0
       ? `，本页命中 ${status.currentPageFilteredCount} 篇`
       : '';

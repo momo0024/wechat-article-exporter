@@ -209,7 +209,9 @@ async function waitForManualSyncJob(fakeid: string, jobId: string) {
       return status;
     }
 
-    applySyncStatus(status);
+    if (currentSyncJobId.value === status.jobId || !syncStatus.value) {
+      applySyncStatus(status);
+    }
     await updateRow(fakeid);
 
     if (isTerminalManualSyncStage(status.stage)) {
@@ -220,7 +222,7 @@ async function waitForManualSyncJob(fakeid: string, jobId: string) {
   }
 }
 
-async function restoreActiveManualSyncJob() {
+async function refreshCurrentSyncRuntime() {
   try {
     const status = await getManualSyncStatus();
     if (!status || isTerminalManualSyncStage(status.stage)) {
@@ -230,15 +232,6 @@ async function restoreActiveManualSyncJob() {
 
     applySyncStatus(status);
     await updateRow(status.fakeid);
-
-    void waitForManualSyncJob(status.fakeid, status.jobId)
-      .catch(error => {
-        console.warn('[sync] 恢复手动同步状态失败:', error);
-      })
-      .finally(async () => {
-        clearSyncRuntimeState();
-        await refresh();
-      });
   } catch (error: any) {
     const statusCode = error?.statusCode || error?.data?.statusCode || error?.response?.status;
     if (statusCode === 404) {
@@ -305,7 +298,7 @@ async function loadAccountArticle(account: MpAccount) {
     }
     throw error;
   } finally {
-    clearSyncRuntimeState();
+    await refreshCurrentSyncRuntime();
   }
 }
 
@@ -556,12 +549,11 @@ function onGridReady(params: GridReadyEvent) {
   gridApi.value = params.api;
 
   restoreColumnState();
-  void refresh().then(() => restoreActiveManualSyncJob());
+  void refresh().then(() => refreshCurrentSyncRuntime());
   if (!refreshTimer) {
     refreshTimer = window.setInterval(() => {
-      if (!isSyncing.value) {
-        void refresh();
-      }
+      void refreshCurrentSyncRuntime();
+      void refresh();
     }, ACCOUNT_PAGE_REFRESH_INTERVAL_MS);
   }
 }

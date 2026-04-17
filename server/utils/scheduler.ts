@@ -77,7 +77,7 @@ export async function runAutoSync(): Promise<void> {
   const startTime = Date.now();
   const syncDays = getSchedulerSyncDays();
   console.log('[schedule] ========== 定时同步任务开始 ==========');
-  console.log(`[schedule] 本次定时同步范围: 最近 ${syncDays} 天文章，并为该范围生成文档`);
+  console.log(`[schedule] 本次定时同步范围: 最近 ${syncDays} 天文章；页面添加的公众号会同步并生成文档，接口添加的公众号只同步文章列表`);
 
   await checkCookieExpiry();
 
@@ -88,13 +88,14 @@ export async function runAutoSync(): Promise<void> {
   }
   console.log(`[schedule] 使用 session: ${session.authKey.substring(0, 8)}...`);
 
-  const accounts = await listSyncableAccounts({ excludeInterface: true });
+  const accounts = await listSyncableAccounts();
 
   if (accounts.length === 0) {
     console.log('[schedule] 没有需要同步的公众号');
     return;
   }
-  console.log(`[schedule] 共 ${accounts.length} 个公众号待同步`);
+  const interfaceAccountCount = accounts.filter(account => account.isInterface).length;
+  console.log(`[schedule] 共 ${accounts.length} 个公众号待同步，其中接口添加 ${interfaceAccountCount} 个，页面添加 ${accounts.length - interfaceAccountCount} 个`);
 
   const syncToTimestamp = Math.round(Date.now() / 1000) - syncDays * SECONDS_PER_DAY;
   const handles = [];
@@ -105,7 +106,7 @@ export async function runAutoSync(): Promise<void> {
       nickname: account.nickname || account.fakeid,
       roundHeadImg: account.roundHeadImg,
       syncToTimestamp,
-      exportDocs: true,
+      exportDocs: !account.isInterface,
     }));
   }
 

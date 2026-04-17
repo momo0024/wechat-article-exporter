@@ -196,7 +196,8 @@ export const apis = [
       ],
       queued_fakeids: ['MzA3NzAyMzMyMA=='],
     },
-    remark: '此接口不需要 API 密钥；请求体兼容 raw body / account / mpAccount / mpAccounts 结构；对外调用默认按接口导入处理。',
+    remark:
+      '此接口不需要 API 密钥；请求体兼容 raw body / account / mpAccount / mpAccounts 结构；对外调用默认按接口导入处理。',
   },
   {
     name: '根据文章链接搜索公众号',
@@ -445,7 +446,8 @@ export const apis = [
   },
   {
     name: '查询公众号同步状态',
-    description: '传入一个或多个 fakeid，查询数据库中的同步状态。',
+    description:
+      '传入一个或多个 fakeid，查询数据库中的同步状态。同步状态：queued=排队中，syncing=同步中，success=同步成功，failed=同步失败；为空表示未开始同步',
     url: '/api/public/v1/db/account-status',
     method: 'POST',
     params: [

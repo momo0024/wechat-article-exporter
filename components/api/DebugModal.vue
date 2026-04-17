@@ -69,9 +69,19 @@ function submit() {
 
   btnLoading.value = true;
   resp.value = null;
-  fetch(url, {
+  
+  const options: RequestInit = {
     method: selectedApi.value.method,
-  })
+  };
+  
+  if (selectedApi.value.method === 'POST') {
+    options.headers = {
+      'Content-Type': 'application/json'
+    };
+    options.body = JSON.stringify(payload.value);
+  }
+  
+  fetch(url, options)
     .then(resp => {
       if (resp.headers.get('content-type') === 'application/json') {
         return resp.json();

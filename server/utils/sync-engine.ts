@@ -28,9 +28,13 @@ export interface SyncPageProgress {
   rawCount: number;
   articleCount: number;
   filteredCount: number;
+  savedMsgCount: number;
+  syncedMessageCount: number;
   totalCount: number;
   completed: boolean;
 }
+
+export type SyncYieldReason = 'preempted' | 'message-slice';
 
 export interface SyncRetryProgress {
   stage: 'syncing';
@@ -48,10 +52,13 @@ export interface SyncAccountResult {
   nickname: string;
   success: boolean;
   articleCount: number;
+  syncedMessageCount?: number;
   failedUrls: string[];
   generated: number;
   skipped: number;
   failed: number;
+  yielded?: boolean;
+  yieldReason?: SyncYieldReason;
   error?: string;
 }
 
@@ -67,6 +74,8 @@ export interface SyncAccountOptions {
   delayMs?: number;
   exportDocs?: boolean;
   isCancelled?: () => boolean;
+  shouldYield?: () => boolean;
+  yieldAfterMessages?: number;
   onPageFetched?: (progress: SyncPageProgress) => void | Promise<void>;
   onExportArticleStart?: (progress: ArticleExportProgress) => void | Promise<void>;
   onRetry?: (progress: SyncRetryProgress | ArticleExportRetryProgress) => void | Promise<void>;
@@ -115,6 +124,42 @@ function mergeExportTotals(target: AutoExportResult, next: AutoExportResult) {
   target.failed += next.failed;
   target.formats = next.formats.length > 0 ? next.formats : target.formats;
   target.errors.push(...next.errors);
+}
+
+function resolveYieldReason(options: SyncAccountOptions, syncedMessages: number): SyncYieldReason | null {
+  if (options.shouldYield?.()) {
+    return 'preempted';
+  }
+
+  if (Number.isFinite(options.yieldAfterMessages) && Number(options.yieldAfterMessages) > 0 && syncedMessages >= Number(options.yieldAfterMessages)) {
+    return 'message-slice';
+  }
+
+  return null;
+}
+
+function buildYieldResult(
+  options: SyncAccountOptions,
+  syncedArticles: number,
+  syncedMessages: number,
+  failedUrls: string[],
+  exportTotals: AutoExportResult,
+  yieldReason: SyncYieldReason,
+): SyncAccountResult {
+  return {
+    fakeid: options.fakeid,
+    nickname: options.nickname,
+    success: false,
+    articleCount: syncedArticles,
+    syncedMessageCount: syncedMessages,
+    failedUrls,
+    generated: exportTotals.generated,
+    skipped: exportTotals.skipped,
+    failed: exportTotals.failed,
+    yielded: true,
+    yieldReason,
+    error: 'yielded',
+  };
 }
 
 function parsePublishInfo(item: PublishListItem): PublishInfo {
@@ -503,6 +548,7 @@ export async function syncAccountByRange(options: SyncAccountOptions): Promise<S
   let begin = 0;
   let pageNumber = 0;
   let syncedArticles = 0;
+  let syncedMessages = 0;
 
   console.log(
     `[${options.source}] 开始同步【${options.nickname}】(${options.fakeid})，截止时间: ${new Date(options.syncToTimestamp * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}`,
@@ -511,6 +557,12 @@ export async function syncAccountByRange(options: SyncAccountOptions): Promise<S
   try {
     while (true) {
       ensureNotCancelled(options.isCancelled);
+
+      const prePageYieldReason = resolveYieldReason(options, syncedMessages);
+      if (prePageYieldReason) {
+        await touchLastUpdateTime(options.fakeid);
+        return buildYieldResult(options, syncedArticles, syncedMessages, failedUrls, exportTotals, prePageYieldReason);
+      }
 
       pageNumber += 1;
       await options.onStageChange?.('syncing');
@@ -527,17 +579,18 @@ export async function syncAccountByRange(options: SyncAccountOptions): Promise<S
       );
       const filtered = filterPublishListForSync(options.fakeid, page.publishList, options.syncToTimestamp, seenArticleKeys);
 
-      await options.onPageFetched?.({
-        begin,
-        pageNumber,
-        rawCount: page.rawCount,
-        articleCount: page.articles.length,
-        filteredCount: filtered.articles.length,
-        totalCount: page.totalCount,
-        completed: page.completed,
-      });
-
       if (page.completed) {
+        await options.onPageFetched?.({
+          begin,
+          pageNumber,
+          rawCount: page.rawCount,
+          articleCount: page.articles.length,
+          filteredCount: filtered.articles.length,
+          savedMsgCount: 0,
+          syncedMessageCount: syncedMessages,
+          totalCount: page.totalCount,
+          completed: page.completed,
+        });
         await savePublishPageToDB({
           fakeid: options.fakeid,
           nickname: options.nickname,
@@ -549,6 +602,7 @@ export async function syncAccountByRange(options: SyncAccountOptions): Promise<S
         break;
       }
 
+      let savedMsgCount = 0;
       if (filtered.publishList.length > 0) {
         const saveResult = await savePublishPageToDB({
           fakeid: options.fakeid,
@@ -559,6 +613,8 @@ export async function syncAccountByRange(options: SyncAccountOptions): Promise<S
           completed: false,
         });
         syncedArticles += saveResult.articleCount;
+        syncedMessages += saveResult.msgCount;
+        savedMsgCount = saveResult.msgCount;
 
         if (options.exportDocs !== false && filtered.urls.length > 0) {
           await options.onStageChange?.('exporting');
@@ -573,6 +629,24 @@ export async function syncAccountByRange(options: SyncAccountOptions): Promise<S
           mergeExportTotals(exportTotals, exportResult);
           failedUrls.push(...exportResult.errors);
         }
+      }
+
+      await options.onPageFetched?.({
+        begin,
+        pageNumber,
+        rawCount: page.rawCount,
+        articleCount: page.articles.length,
+        filteredCount: filtered.articles.length,
+        savedMsgCount,
+        syncedMessageCount: syncedMessages,
+        totalCount: page.totalCount,
+        completed: page.completed,
+      });
+
+      const postPageYieldReason = resolveYieldReason(options, syncedMessages);
+      if (postPageYieldReason) {
+        await touchLastUpdateTime(options.fakeid);
+        return buildYieldResult(options, syncedArticles, syncedMessages, failedUrls, exportTotals, postPageYieldReason);
       }
 
       const oldest = page.articles.at(-1);
@@ -608,6 +682,7 @@ export async function syncAccountByRange(options: SyncAccountOptions): Promise<S
       nickname: options.nickname,
       success: true,
       articleCount: syncedArticles,
+      syncedMessageCount: syncedMessages,
       failedUrls,
       generated: exportTotals.generated,
       skipped: exportTotals.skipped,
@@ -620,6 +695,7 @@ export async function syncAccountByRange(options: SyncAccountOptions): Promise<S
       nickname: options.nickname,
       success: false,
       articleCount: syncedArticles,
+      syncedMessageCount: syncedMessages,
       failedUrls,
       generated: exportTotals.generated,
       skipped: exportTotals.skipped,

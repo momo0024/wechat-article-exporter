@@ -14,6 +14,7 @@ import {
   type SyncAccountResult,
   type SyncPageProgress,
   type SyncRetryProgress,
+  type SyncYieldReason,
 } from '~/server/utils/sync-engine';
 import { ACCOUNT_SYNC_STATUS } from '~/shared/utils/account-sync-status';
 
@@ -56,6 +57,11 @@ interface QueueTask {
   subscribers: QueueSubscriber[];
   promise: Promise<SyncAccountResult>;
   resolve: (result: SyncAccountResult) => void;
+  syncedMessageCount: number;
+  yieldAfterMessages: number;
+  forceYield: boolean;
+  preferredResumeTaskId: string | null;
+  resumePriority: number;
 }
 
 const PRIORITY: Record<SyncQueueSource, number> = {
@@ -63,6 +69,8 @@ const PRIORITY: Record<SyncQueueSource, number> = {
   manual: 1,
   schedule: 2,
 };
+
+const INTERFACE_PREEMPTION_MESSAGE_THRESHOLD = 40;
 
 const taskByFakeid = new Map<string, QueueTask>();
 const pendingTasks: QueueTask[] = [];
@@ -122,11 +130,29 @@ async function notifyRetry(task: QueueTask, progress: SyncRetryProgress | Articl
 
 function sortPendingTasks() {
   pendingTasks.sort((left, right) => {
+    if (left.resumePriority !== right.resumePriority) {
+      return left.resumePriority - right.resumePriority;
+    }
+
     if (left.priority !== right.priority) {
       return left.priority - right.priority;
     }
     return left.order - right.order;
   });
+}
+
+function tryRequestInterfacePreemption(task: QueueTask) {
+  if (task.source !== 'interface' || !activeTask || activeTask.id === task.id || activeTask.forceYield) {
+    return;
+  }
+
+  if (activeTask.syncedMessageCount < INTERFACE_PREEMPTION_MESSAGE_THRESHOLD) {
+    return;
+  }
+
+  activeTask.forceYield = true;
+  task.yieldAfterMessages = Math.max(task.yieldAfterMessages, INTERFACE_PREEMPTION_MESSAGE_THRESHOLD);
+  task.preferredResumeTaskId = activeTask.id;
 }
 
 async function runTask(task: QueueTask): Promise<SyncAccountResult> {
@@ -199,10 +225,13 @@ async function runTask(task: QueueTask): Promise<SyncAccountResult> {
     source: toExportSource(task.source),
     exportDocs: task.exportDocs,
     isCancelled: () => isTaskCancelled(task),
+    shouldYield: () => task.forceYield,
+    yieldAfterMessages: task.yieldAfterMessages,
     onStageChange: async (stage) => {
       await notifyStage(task, stage);
     },
     onPageFetched: async (progress) => {
+      task.syncedMessageCount = progress.syncedMessageCount;
       await notifyPageFetched(task, progress);
     },
     onExportArticleStart: async (progress) => {
@@ -212,6 +241,30 @@ async function runTask(task: QueueTask): Promise<SyncAccountResult> {
       await notifyRetry(task, progress);
     },
   });
+}
+
+async function requeueYieldedTask(task: QueueTask, yieldReason?: SyncYieldReason) {
+  const preferredResumeTaskId = task.preferredResumeTaskId;
+
+  task.forceYield = false;
+  task.syncedMessageCount = 0;
+  task.yieldAfterMessages = 0;
+  task.preferredResumeTaskId = null;
+  task.resumePriority = 0;
+  task.order = ++taskOrder;
+
+  pendingTasks.push(task);
+
+  if (yieldReason === 'message-slice' && preferredResumeTaskId) {
+    const resumeTask = pendingTasks.find(item => item.id === preferredResumeTaskId);
+    if (resumeTask) {
+      resumeTask.resumePriority = -1;
+    }
+  }
+
+  sortPendingTasks();
+  await updateAccountSyncStatus(task.fakeid, ACCOUNT_SYNC_STATUS.QUEUED);
+  await notifyStage(task, 'queued');
 }
 
 async function drainQueue() {
@@ -228,6 +281,9 @@ async function drainQueue() {
       }
 
       activeTask = nextTask;
+  activeTask.resumePriority = 0;
+  activeTask.forceYield = false;
+  activeTask.syncedMessageCount = 0;
       await updateAccountSyncStatus(nextTask.fakeid, ACCOUNT_SYNC_STATUS.SYNCING);
       await notifyStage(nextTask, 'syncing');
 
@@ -246,6 +302,12 @@ async function drainQueue() {
           failed: 0,
           error: error?.message || 'unknown error',
         };
+      }
+
+      if (result.yielded) {
+        await requeueYieldedTask(nextTask, result.yieldReason);
+        activeTask = null;
+        continue;
       }
 
       const terminalStage: QueueRuntimeStage = result.error === 'cancelled'
@@ -304,6 +366,8 @@ export async function enqueueAccountSync(input: EnqueueAccountSyncInput): Promis
       sortPendingTasks();
     }
 
+    tryRequestInterfacePreemption(existingTask);
+
     return {
       id: existingTask.id,
       fakeid: existingTask.fakeid,
@@ -335,6 +399,11 @@ export async function enqueueAccountSync(input: EnqueueAccountSyncInput): Promis
     }],
     promise,
     resolve: resolveTask,
+    syncedMessageCount: 0,
+    yieldAfterMessages: 0,
+    forceYield: false,
+    preferredResumeTaskId: null,
+    resumePriority: 0,
   };
 
   taskByFakeid.set(task.fakeid, task);
@@ -342,6 +411,7 @@ export async function enqueueAccountSync(input: EnqueueAccountSyncInput): Promis
   sortPendingTasks();
   await updateAccountSyncStatus(task.fakeid, ACCOUNT_SYNC_STATUS.QUEUED);
   await notifyStage(task, 'queued');
+  tryRequestInterfacePreemption(task);
   void drainQueue();
 
   return {

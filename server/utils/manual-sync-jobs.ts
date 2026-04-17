@@ -4,9 +4,11 @@ import type { SyncRetryProgress } from '~/server/utils/sync-engine';
 import type { ArticleExportProgress, ArticleExportRetryProgress } from '~/server/utils/docx-generator';
 
 export type ManualSyncStage = 'queued' | 'syncing' | 'exporting' | 'finalizing' | 'completed' | 'failed' | 'cancelled' | 'cancelling';
+export type ManualSyncJobSource = 'manual' | 'interface' | 'schedule';
 
 export interface ManualSyncJobStatus {
   jobId: string;
+  source: ManualSyncJobSource;
   fakeid: string;
   nickname: string;
   stage: ManualSyncStage;
@@ -40,6 +42,11 @@ interface StartManualSyncInput {
   syncToTimestamp: number;
 }
 
+interface StartSyncJobInput extends StartManualSyncInput {
+  source: ManualSyncJobSource;
+  exportDocs: boolean;
+}
+
 const jobs = new Map<string, ManualSyncJobStatus>();
 
 function isTerminalStage(stage: ManualSyncStage) {
@@ -54,11 +61,35 @@ function normalizePageNumber(pageNumber: number | null | undefined): number {
   return Math.max(1, Number(pageNumber || 0));
 }
 
-export async function startManualSyncJob(input: StartManualSyncInput): Promise<ManualSyncJobStatus> {
+function getStagePriority(stage: ManualSyncStage): number {
+  if (stage === 'syncing' || stage === 'exporting' || stage === 'finalizing' || stage === 'cancelling') {
+    return 0;
+  }
+
+  if (stage === 'queued') {
+    return 1;
+  }
+
+  return 2;
+}
+
+function sortJobStatuses(statuses: ManualSyncJobStatus[]) {
+  return statuses.sort((left, right) => {
+    const stageDiff = getStagePriority(left.stage) - getStagePriority(right.stage);
+    if (stageDiff !== 0) {
+      return stageDiff;
+    }
+
+    return right.updatedAt - left.updatedAt;
+  });
+}
+
+export async function startSyncJob(input: StartSyncJobInput): Promise<ManualSyncJobStatus> {
   const now = Date.now();
   const jobId = randomUUID();
   const status: ManualSyncJobStatus = {
     jobId,
+    source: input.source,
     fakeid: input.fakeid,
     nickname: input.nickname,
     stage: 'queued',
@@ -89,12 +120,12 @@ export async function startManualSyncJob(input: StartManualSyncInput): Promise<M
   let handle;
   try {
     handle = await enqueueAccountSync({
-      source: 'manual',
+      source: input.source,
       fakeid: input.fakeid,
       nickname: input.nickname,
       roundHeadImg: input.roundHeadImg,
       syncToTimestamp: input.syncToTimestamp,
-      exportDocs: true,
+      exportDocs: input.exportDocs,
       isCancelled: () => status.cancelRequested,
       onStageChange: async (stage) => {
         if (stage === 'queued') {
@@ -235,14 +266,30 @@ export async function startManualSyncJob(input: StartManualSyncInput): Promise<M
   return status;
 }
 
+export async function startManualSyncJob(input: StartManualSyncInput): Promise<ManualSyncJobStatus> {
+  return await startSyncJob({
+    ...input,
+    source: 'manual',
+    exportDocs: true,
+  });
+}
+
+export async function startInterfaceSyncJob(input: StartManualSyncInput): Promise<ManualSyncJobStatus> {
+  return await startSyncJob({
+    ...input,
+    source: 'interface',
+    exportDocs: false,
+  });
+}
+
 export function getManualSyncJobStatus(jobId?: string): ManualSyncJobStatus | null {
   if (jobId) {
     return jobs.get(jobId) || null;
   }
 
-  return Array.from(jobs.values())
-    .filter(status => !isTerminalStage(status.stage))
-    .sort((left, right) => right.updatedAt - left.updatedAt)[0] || null;
+  return sortJobStatuses(
+    Array.from(jobs.values()).filter(status => !isTerminalStage(status.stage)),
+  )[0] || null;
 }
 
 export function listManualSyncJobStatuses(jobIds?: string[]): ManualSyncJobStatus[] {
@@ -250,7 +297,7 @@ export function listManualSyncJobStatuses(jobIds?: string[]): ManualSyncJobStatu
     ? jobIds.map(jobId => jobs.get(jobId)).filter((status): status is ManualSyncJobStatus => Boolean(status))
     : Array.from(jobs.values()).filter(status => !isTerminalStage(status.stage));
 
-  return candidates.sort((left, right) => right.updatedAt - left.updatedAt);
+  return sortJobStatuses(candidates);
 }
 
 export function cancelManualSyncJob(jobId: string): ManualSyncJobStatus | null {
