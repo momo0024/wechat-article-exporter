@@ -1,6 +1,7 @@
 import { ARTICLE_LIST_PAGE_SIZE, RETRY_POLICY, USER_AGENT } from '~/config';
 import type { AppMsgEx, PublishInfo, PublishListItem } from '~/types/types';
 import { getPool } from '~/server/db/postgres';
+import { compactEscapedJson } from '~/server/utils/async-log';
 import { AccountCookie, cookieStore } from '~/server/utils/CookieStore';
 import { resolveArticleCover, resolveArticleDeleted, resolveArticleDigest } from '~/server/utils/article-record';
 import {
@@ -94,6 +95,28 @@ interface FilteredPageResult {
   publishList: PublishListItem[];
   articles: AppMsgEx[];
   urls: string[];
+}
+
+type SessionExpiredError = Error & {
+  wechatRet?: number;
+  wechatErrMsg?: string;
+  wechatBaseResp?: Record<string, any>;
+};
+
+function createSessionExpiredError(baseResp: Record<string, any> | undefined): SessionExpiredError {
+  const error = new Error('session expired') as SessionExpiredError;
+  error.wechatRet = Number(baseResp?.ret || 200003);
+  error.wechatErrMsg = String(baseResp?.err_msg || 'unknown');
+  error.wechatBaseResp = baseResp;
+  return error;
+}
+
+function formatWeChatErrorDetails(error: SessionExpiredError | undefined): string {
+  if (!error?.wechatRet) {
+    return '';
+  }
+
+  return ` | ret=${error.wechatRet} | err_msg=${error.wechatErrMsg || 'unknown'}`;
 }
 
 function delay(ms: number): Promise<void> {
@@ -382,7 +405,17 @@ async function fetchArticlesPageOnce(
   const tag = `[${source}]`;
 
   if (data.base_resp?.ret === 200003) {
-    throw new Error('session expired');
+    const error = createSessionExpiredError(data.base_resp);
+    console.error(
+      `${tag} 微信返回会话失效: ${compactEscapedJson({
+        fakeid,
+        begin,
+        ret: error.wechatRet,
+        err_msg: error.wechatErrMsg,
+        base_resp: error.wechatBaseResp,
+      })}`,
+    );
+    throw error;
   }
   if (data.base_resp?.ret !== 0) {
     throw new Error(`WeChat API error: ${data.base_resp?.ret} - ${data.base_resp?.err_msg || 'unknown'}`);
@@ -429,7 +462,10 @@ async function fetchArticlesPageWithRetry(
       page = await fetchArticlesPageOnce(authKey, token, cookie, fakeid, begin, source);
       break;
     } catch (error: any) {
-      console.error(`[${source}] ${fakeid} 第 ${pageNumber} 页请求失败 (${attempt + 1}/${totalAttempts}):`, error);
+      console.error(
+        `[${source}] ${fakeid} 第 ${pageNumber} 页请求失败 (${attempt + 1}/${totalAttempts})${formatWeChatErrorDetails(error)}:`,
+        error,
+      );
       if (error?.message === 'session expired' || attempt === totalAttempts - 1) {
         throw error;
       }
@@ -544,6 +580,10 @@ export async function getActiveSession(): Promise<ActiveSession | null> {
 
   const row = res.rows[0];
   const accountCookie = AccountCookie.create(row.token, row.cookies);
+  if (accountCookie.isExpired) {
+    return null;
+  }
+
   return {
     authKey: row.auth_key,
     token: row.token,
@@ -821,7 +861,10 @@ export async function syncAccountByRange(options: SyncAccountOptions): Promise<S
       failed: exportTotals.failed,
     };
   } catch (error: any) {
-    console.error(`[${options.source}] 【${options.nickname}】同步失败:`, error);
+    console.error(
+      `[${options.source}] 【${options.nickname}】同步失败${formatWeChatErrorDetails(error)}:`,
+      error,
+    );
     return {
       fakeid: options.fakeid,
       nickname: options.nickname,

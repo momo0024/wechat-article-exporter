@@ -7,8 +7,21 @@ import { getActiveSession, type SyncAccountResult } from '~/server/utils/sync-en
 import { getPool } from '~/server/db/postgres';
 
 const SECONDS_PER_DAY = 24 * 60 * 60;
-const COOKIE_WARNING_WINDOW_SEC = SECONDS_PER_DAY;
 const DEFAULT_SCHEDULER_SYNC_DAYS = 3;
+const DEFAULT_SCHEDULER_COOKIE_WARNING_HOURS = 33;
+
+export function getSchedulerCookieWarningWindowHours(): number {
+  const rawValue = Number(process.env.SCHEDULER_COOKIE_WARNING_HOURS || DEFAULT_SCHEDULER_COOKIE_WARNING_HOURS);
+  if (!Number.isFinite(rawValue) || rawValue <= 0) {
+    return DEFAULT_SCHEDULER_COOKIE_WARNING_HOURS;
+  }
+
+  return Math.max(1, rawValue);
+}
+
+function getSchedulerCookieWarningWindowSec(): number {
+  return Math.round(getSchedulerCookieWarningWindowHours() * 60 * 60);
+}
 
 export function getSchedulerSyncDays(): number {
   const rawValue = Number(process.env.SCHEDULER_SYNC_DAYS || DEFAULT_SCHEDULER_SYNC_DAYS);
@@ -20,9 +33,11 @@ export function getSchedulerSyncDays(): number {
 }
 
 /**
- * 检查所有 session 的 cookie 过期时间，如果任意 session 剩余不足 24 小时则发邮件提醒
+ * 检查所有 session 的 cookie 过期时间，如果任意 session 剩余不足预警阈值则发邮件提醒
  */
 export async function checkCookieExpiry(): Promise<void> {
+  const warningWindowHours = getSchedulerCookieWarningWindowHours();
+  const warningWindowSec = getSchedulerCookieWarningWindowSec();
   const pool = getPool();
   const now = Math.round(Date.now() / 1000);
   const res = await pool.query(
@@ -32,7 +47,7 @@ export async function checkCookieExpiry(): Promise<void> {
 
   if (res.rows.length === 0) {
     console.warn('[schedule] 没有有效的 session，无法同步。请先登录微信公众号平台。');
-    await sendCookieExpiryWarning('当前没有任何有效的登录会话，请立即重新扫码登录。');
+    await sendCookieExpiryWarning('当前没有任何有效的登录会话，请立即重新扫码登录。', warningWindowHours);
     return;
   }
 
@@ -42,7 +57,7 @@ export async function checkCookieExpiry(): Promise<void> {
     const cookies = row.cookies as Array<Record<string, any>>;
 
     const sessionRemainSec = row.expires_at - now;
-    if (sessionRemainSec < COOKIE_WARNING_WINDOW_SEC) {
+    if (sessionRemainSec < warningWindowSec) {
       const hours = Math.round(sessionRemainSec / 3600 * 10) / 10;
       expiryWarnings.push(`Session(${row.auth_key.substring(0, 8)}...): 剩余 ${hours} 小时`);
     }
@@ -51,7 +66,7 @@ export async function checkCookieExpiry(): Promise<void> {
       if (typeof cookie.expires_timestamp === 'number') {
         const remainMs = cookie.expires_timestamp - Date.now();
         const remainSec = remainMs / 1000;
-        if (remainSec > 0 && remainSec < COOKIE_WARNING_WINDOW_SEC) {
+        if (remainSec > 0 && remainSec < warningWindowSec) {
           const hours = Math.round(remainSec / 3600 * 10) / 10;
           expiryWarnings.push(`Cookie "${cookie.name}": 剩余 ${hours} 小时 (${new Date(cookie.expires_timestamp).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })})`);
         }
@@ -65,7 +80,7 @@ export async function checkCookieExpiry(): Promise<void> {
 
   if (expiryWarnings.length > 0) {
     console.warn('[schedule] Cookie 即将过期:\n' + expiryWarnings.join('\n'));
-    await sendCookieExpiryWarning(expiryWarnings.join('\n'));
+    await sendCookieExpiryWarning(expiryWarnings.join('\n'), warningWindowHours);
   } else {
     console.log('[schedule] Cookie 有效期正常');
   }
@@ -103,27 +118,23 @@ export async function runAutoSync(): Promise<void> {
   const interfaceAccountCount = accounts.filter(account => account.isInterface).length;
   console.log(`[schedule] 共 ${accounts.length} 个公众号待同步，其中接口添加 ${interfaceAccountCount} 个，页面添加 ${accounts.length - interfaceAccountCount} 个`);
 
+  const results: SyncAccountResult[] = [];
   const syncToTimestamp = Math.round(Date.now() / 1000) - syncDays * SECONDS_PER_DAY;
-  const handles = [];
   for (const account of accounts) {
-    handles.push(await enqueueAccountSync({
+    const handle = await enqueueAccountSync({
       source: 'schedule',
       fakeid: account.fakeid,
       nickname: account.nickname || account.fakeid,
       roundHeadImg: account.roundHeadImg,
       syncToTimestamp,
       exportDocs: !account.isInterface,
-    }));
-  }
-
-  const results: SyncAccountResult[] = [];
-  for (const handle of handles) {
+    });
     const result = await handle.promise;
     results.push(result);
 
-    if (result.error === 'session expired') {
+    if (result.error === 'session expired' || result.error?.includes('登录已过期')) {
       console.error('[schedule] Session 已过期，中止同步');
-      await sendCookieExpiryWarning('定时同步过程中 Session 已过期，请立即重新扫码登录。');
+      await sendCookieExpiryWarning('定时同步过程中 Session 已过期，请立即重新扫码登录。', getSchedulerCookieWarningWindowHours());
       break;
     }
   }

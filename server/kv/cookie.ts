@@ -13,7 +13,52 @@ export interface SessionProfileValue {
   avatar: string;
 }
 
-const SESSION_TTL_SECONDS = 60 * 60 * 24 * 4; // 4 days
+export const SESSION_TTL_SECONDS = 60 * 60 * 24 * 4; // 4 days
+
+export function getEffectiveSessionExpiresAt(input: {
+  sessionExpiresAtMs?: number | null;
+  cookieExpiresAtMs?: number | null;
+}): number | null {
+  const candidates = [input.sessionExpiresAtMs, input.cookieExpiresAtMs]
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  return Math.min(...candidates);
+}
+
+export function getRemainingSessionSeconds(expiresAtMs: number | null, nowMs = Date.now()): number {
+  if (typeof expiresAtMs !== 'number' || !Number.isFinite(expiresAtMs)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.floor((expiresAtMs - nowMs) / 1000));
+}
+
+export async function getSessionExpiresAt(key: CookieKVKey): Promise<number | null> {
+  const pool = getPool();
+  try {
+    const res = await pool.query(
+      `SELECT expires_at FROM session WHERE auth_key = $1 LIMIT 1`,
+      [key]
+    );
+    if (res.rows.length === 0) {
+      return null;
+    }
+
+    const expiresAt = Number(res.rows[0].expires_at || 0);
+    if (!Number.isFinite(expiresAt) || expiresAt <= 0) {
+      return null;
+    }
+
+    return expiresAt * 1000;
+  } catch (err) {
+    console.error('session expiry query failed:', err);
+    return null;
+  }
+}
 
 export async function setMpCookie(key: CookieKVKey, data: CookieKVValue): Promise<boolean> {
   const pool = getPool();
@@ -25,9 +70,7 @@ export async function setMpCookie(key: CookieKVKey, data: CookieKVValue): Promis
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (auth_key) DO UPDATE SET
          token = EXCLUDED.token,
-         cookies = EXCLUDED.cookies,
-         created_at = EXCLUDED.created_at,
-         expires_at = EXCLUDED.expires_at`,
+         cookies = EXCLUDED.cookies`,
       [key, data.token, JSON.stringify(data.cookies), now, expiresAt]
     );
     return true;

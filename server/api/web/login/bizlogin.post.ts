@@ -1,7 +1,11 @@
-import dayjs from 'dayjs';
 import { request } from '#shared/utils/request';
 import { getCookieFromResponse, getCookiesFromRequest } from '~/server/utils/CookieStore';
-import { updateSessionProfile } from '~/server/kv/cookie';
+import {
+  getEffectiveSessionExpiresAt,
+  getSessionExpiresAt,
+  SESSION_TTL_SECONDS,
+  updateSessionProfile,
+} from '~/server/kv/cookie';
 import { cookieStore } from '~/server/utils/CookieStore';
 import { proxyMpRequest } from '~/server/utils/proxy-request';
 
@@ -58,7 +62,12 @@ export default defineEventHandler(async event => {
   });
 
   const accountCookie = await cookieStore.getAccountCookie(authKey);
-  const expiresAt = accountCookie?.expiresAt || dayjs().add(4, 'days').valueOf();
+  const sessionExpiresAt = await getSessionExpiresAt(authKey);
+  const fallbackExpiresAt = Date.now() + SESSION_TTL_SECONDS * 1000;
+  const expiresAt = getEffectiveSessionExpiresAt({
+    sessionExpiresAtMs: sessionExpiresAt || fallbackExpiresAt,
+    cookieExpiresAtMs: accountCookie?.expiresAt || null,
+  }) || fallbackExpiresAt;
 
   const body = JSON.stringify({
     nickname: nick_name,

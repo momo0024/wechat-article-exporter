@@ -261,7 +261,7 @@ class CookieStore {
   }
 
   /**
-   * 用微信响应返回的 set-cookie 更新已缓存的 cookie（自动续期）
+   * 用微信响应返回的 set-cookie 刷新已缓存的 cookie 字段
    * 异步写盘，不阻塞请求链路
    * @param authKey
    * @param newCookies 微信响应头中的 set-cookie 数组
@@ -270,7 +270,7 @@ class CookieStore {
     if (!newCookies.length) return false;
     const accountCookie = await this.getAccountCookie(authKey);
     if (!accountCookie) {
-      console.warn(`[cookie-store] 未找到对应登录态，跳过自动续期 | authKey=${maskAuthKey(authKey)}`);
+      console.warn(`[cookie-store] 未找到对应登录态，跳过 cookie 刷新 | authKey=${maskAuthKey(authKey)}`);
       return false;
     }
     const changed = accountCookie.update(newCookies);
@@ -279,7 +279,7 @@ class CookieStore {
       setMpCookie(authKey, accountCookie.toJSON()).catch(e =>
         console.warn('[cookie-store] 异步持久化更新 cookie 失败:', e)
       );
-      console.log(`[cookie-store] cookie 已续期 | authKey=${maskAuthKey(authKey)} | ${accountCookie.expiryInfo()}`);
+      console.log(`[cookie-store] cookie 已刷新 | authKey=${maskAuthKey(authKey)} | ${accountCookie.expiryInfo()}`);
       return true;
     }
 

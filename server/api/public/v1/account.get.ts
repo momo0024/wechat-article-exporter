@@ -21,8 +21,11 @@ export default defineEventHandler(async event => {
     );
     const session = sessionRes.rows[0];
     if (session?.token && session?.cookies) {
-      token = session.token;
-      cookie = AccountCookie.create(session.token, session.cookies).toString();
+      const accountCookie = AccountCookie.create(session.token, session.cookies);
+      if (!accountCookie.isExpired) {
+        token = session.token;
+        cookie = accountCookie.toString();
+      }
     }
   }
 

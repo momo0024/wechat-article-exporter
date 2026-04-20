@@ -68,14 +68,14 @@ export async function sendEmail(options: EmailOptions): Promise<boolean> {
   }
 }
 
-export function sendCookieExpiryWarning(expiryDetails: string): Promise<boolean> {
+export function sendCookieExpiryWarning(expiryDetails: string, warningWindowHours = 33): Promise<boolean> {
   const now = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
   return sendEmail({
     subject: '⚠️ 微信公众号 Cookie 即将过期，请重新登录',
     html: `
       <div style="font-family: sans-serif; padding: 20px; max-width: 600px;">
         <h2 style="color: #e65100;">⚠️ Cookie 即将过期提醒</h2>
-        <p>检测到微信公众号平台的登录 Cookie 即将过期（剩余时间不足 24 小时），请尽快重新扫码登录以保证定时同步正常运行。</p>
+        <p>检测到微信公众号平台的登录会话接近过期或已经失效，当前预警阈值为 ${warningWindowHours} 小时，请尽快重新扫码登录以保证定时同步正常运行。</p>
         <div style="background: #fff3e0; padding: 12px 16px; border-radius: 6px; margin: 16px 0;">
           <p style="margin: 0; font-size: 14px; color: #333;"><strong>过期详情：</strong></p>
           <pre style="margin: 8px 0 0; font-size: 13px; white-space: pre-wrap; color: #555;">${expiryDetails}</pre>
