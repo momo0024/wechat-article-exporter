@@ -23,6 +23,7 @@ export type ArticleContentFormat = 'html' | 'markdown' | 'text' | 'json';
 
 export interface ResolveArticleContentOptions {
   remoteFetchRetries?: number;
+  skipRemoteFetchDelay?: boolean;
 }
 
 export const SUPPORTED_ARTICLE_CONTENT_FORMATS: ArticleContentFormat[] = ['html', 'markdown', 'text', 'json'];
@@ -195,8 +196,13 @@ async function getCachedArticleHtml(url: string): Promise<string | null> {
   return Buffer.from(res.rows[0].file).toString('utf-8');
 }
 
-async function fetchRemoteArticleHtml(url: string): Promise<string> {
-  await waitRandomArticleFetchDelay(`[article-content] 发起文章抓取 | ${url}`);
+async function fetchRemoteArticleHtml(url: string, options: ResolveArticleContentOptions = {}): Promise<string> {
+  if (options.skipRemoteFetchDelay) {
+    logArticleContent('跳过抓取等待', { url });
+  } else {
+    await waitRandomArticleFetchDelay(`[article-content] 发起文章抓取 | ${url}`);
+  }
+
   const response = await fetch(url, {
     headers: {
       Referer: 'https://mp.weixin.qq.com/',
@@ -233,7 +239,7 @@ async function fetchValidatedRemoteArticleHtml(
     }
 
     try {
-      const remoteHtml = await fetchRemoteArticleHtml(url);
+      const remoteHtml = await fetchRemoteArticleHtml(url, options);
       const remoteStatus = validateFetchedHtml(remoteHtml);
       logArticleContent('远端内容校验', {
         url,

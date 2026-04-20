@@ -40,6 +40,7 @@ export default defineEventHandler(async event => {
   try {
     const result = await resolveArticleContent(url, format, {
       remoteFetchRetries: 0,
+      skipRemoteFetchDelay: true,
     });
     console.log(`[public-download] 返回成功: ${compactEscapedJson({
       url,

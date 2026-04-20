@@ -52,7 +52,9 @@ export default defineEventHandler(async (event) => {
     }
 
     console.log(`[public-db-content] 收到请求: ${compactEscapedJson({ url, format })}`);
-    const result = await resolveArticleContent(url, format);
+    const result = await resolveArticleContent(url, format, {
+      skipRemoteFetchDelay: true,
+    });
     console.log(`[public-db-content] 返回成功: ${compactEscapedJson({
       url,
       format,
