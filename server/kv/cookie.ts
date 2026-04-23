@@ -80,6 +80,29 @@ export async function setMpCookie(key: CookieKVKey, data: CookieKVValue): Promis
   }
 }
 
+export async function setLoginSessionCookie(key: CookieKVKey, data: CookieKVValue): Promise<boolean> {
+  const pool = getPool();
+  try {
+    const now = Math.round(Date.now() / 1000);
+    const expiresAt = now + SESSION_TTL_SECONDS;
+    await pool.query(
+      `INSERT INTO session (auth_key, token, cookies, created_at, expires_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (auth_key) DO UPDATE SET
+         token = EXCLUDED.token,
+         cookies = EXCLUDED.cookies,
+         created_at = EXCLUDED.created_at,
+         expires_at = EXCLUDED.expires_at`,
+      [key, data.token, JSON.stringify(data.cookies), now, expiresAt]
+    );
+    await pool.query(`DELETE FROM session WHERE auth_key <> $1`, [key]);
+    return true;
+  } catch (err) {
+    console.error('login session insert failed:', err);
+    return false;
+  }
+}
+
 export async function updateSessionProfile(key: CookieKVKey, data: SessionProfileValue): Promise<boolean> {
   const pool = getPool();
   try {
@@ -117,13 +140,38 @@ export async function getMpCookie(key: CookieKVKey): Promise<CookieKVValue | nul
   }
 }
 
+export async function getLatestSessionAuthKey(): Promise<string | null> {
+  const pool = getPool();
+  try {
+    const res = await pool.query(
+      `SELECT auth_key
+       FROM session
+       ORDER BY created_at DESC, auth_key DESC
+       LIMIT 1`
+    );
+    if (res.rows.length === 0) {
+      return null;
+    }
+
+    return res.rows[0].auth_key || null;
+  } catch (err) {
+    console.error('latest session key query failed:', err);
+    return null;
+  }
+}
+
 export async function removeMpCookie(key: CookieKVKey): Promise<boolean> {
   const pool = getPool();
   try {
-    await pool.query(`DELETE FROM session WHERE auth_key = $1`, [key]);
+    await pool.query(
+      `UPDATE session
+       SET expires_at = 0
+       WHERE auth_key = $1`,
+      [key]
+    );
     return true;
   } catch (err) {
-    console.error('session delete failed:', err);
+    console.error('session invalidate failed:', err);
     return false;
   }
 }

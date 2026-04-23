@@ -1,4 +1,5 @@
 import { AccountCookie } from '~/server/utils/CookieStore';
+import { getRemainingSessionSeconds } from '~/server/kv/cookie';
 import { buildListSyncableAccountsQuery, listSyncableAccounts } from '~/server/utils/account-info';
 import { enqueueAccountSync } from '~/server/utils/account-sync-queue';
 import { compactEscapedJson } from '~/server/utils/async-log';
@@ -21,6 +22,11 @@ export function getSchedulerCookieWarningWindowHours(): number {
 
 function getSchedulerCookieWarningWindowSec(): number {
   return Math.round(getSchedulerCookieWarningWindowHours() * 60 * 60);
+}
+
+function formatRemainingHours(expiresAtMs: number | null): string {
+  const remainingHours = Math.round((getRemainingSessionSeconds(expiresAtMs) / 3600) * 10) / 10;
+  return `${remainingHours} 小时`;
 }
 
 export function getSchedulerSyncDays(): number {
@@ -102,7 +108,7 @@ export async function runAutoSync(): Promise<void> {
     console.error('[schedule] 没有有效的 session，跳过同步');
     return;
   }
-  console.log(`[schedule] 使用 session: ${session.authKey.substring(0, 8)}...`);
+  console.log(`[schedule] 使用 session: ${session.authKey.substring(0, 8)}... | 剩余有效期 ${formatRemainingHours(session.effectiveExpiresAtMs)}`);
 
   const syncableAccountsQuery = buildListSyncableAccountsQuery();
   console.log(`[schedule] 查询待同步公众号 SQL: ${compactEscapedJson({

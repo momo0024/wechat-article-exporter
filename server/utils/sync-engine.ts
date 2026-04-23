@@ -1,6 +1,7 @@
 import { ARTICLE_LIST_PAGE_SIZE, RETRY_POLICY, USER_AGENT } from '~/config';
 import type { AppMsgEx, PublishInfo, PublishListItem } from '~/types/types';
 import { getPool } from '~/server/db/postgres';
+import { getEffectiveSessionExpiresAt } from '~/server/kv/cookie';
 import { compactEscapedJson } from '~/server/utils/async-log';
 import { AccountCookie, cookieStore } from '~/server/utils/CookieStore';
 import { resolveArticleCover, resolveArticleDeleted, resolveArticleDigest } from '~/server/utils/article-record';
@@ -21,6 +22,7 @@ export interface ActiveSession {
   authKey: string;
   token: string;
   cookie: string;
+  effectiveExpiresAtMs: number | null;
 }
 
 export interface SyncPageProgress {
@@ -571,7 +573,7 @@ export async function getActiveSession(): Promise<ActiveSession | null> {
   const pool = getPool();
   const now = Math.round(Date.now() / 1000);
   const res = await pool.query(
-    `SELECT auth_key, token, cookies FROM session WHERE expires_at > $1 ORDER BY created_at DESC LIMIT 1`,
+    `SELECT auth_key, token, cookies, expires_at FROM session WHERE expires_at > $1 ORDER BY created_at DESC LIMIT 1`,
     [now],
   );
   if (res.rows.length === 0) {
@@ -584,10 +586,16 @@ export async function getActiveSession(): Promise<ActiveSession | null> {
     return null;
   }
 
+  const effectiveExpiresAtMs = getEffectiveSessionExpiresAt({
+    sessionExpiresAtMs: Number(row.expires_at || 0) * 1000,
+    cookieExpiresAtMs: accountCookie.expiresAt,
+  });
+
   return {
     authKey: row.auth_key,
     token: row.token,
     cookie: accountCookie.toString(),
+    effectiveExpiresAtMs,
   };
 }
 

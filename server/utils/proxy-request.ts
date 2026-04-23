@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { isDev, USER_AGENT } from '~/config';
 import {
   getEffectiveSessionExpiresAt,
+  getLatestSessionAuthKey,
   getRemainingSessionSeconds,
   getSessionExpiresAt,
 } from '~/server/kv/cookie';
@@ -137,7 +138,7 @@ export async function proxyMpRequest(options: RequestOptions) {
   else if (options.action === 'login') {
     // 提取出 token 和 cookies
     try {
-      const authKey = crypto.randomUUID().replace(/-/g, '');
+      const authKey = getAuthKeyFromRequest(options.event) || await getLatestSessionAuthKey() || crypto.randomUUID().replace(/-/g, '');
 
       const body = await mpResponse.clone().json();
       const redirectUrl = body?.redirect_url;

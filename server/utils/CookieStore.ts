@@ -1,5 +1,5 @@
 import { H3Event, parseCookies } from 'h3';
-import { CookieKVValue, getMpCookie, removeMpCookie, setMpCookie } from '~/server/kv/cookie';
+import { CookieKVValue, getMpCookie, removeMpCookie, setLoginSessionCookie, setMpCookie } from '~/server/kv/cookie';
 
 // 表示一条 set-cookie 记录的解析结果
 export type CookieEntity = Record<string, string | number>;
@@ -257,7 +257,7 @@ class CookieStore {
     this.store.delete(authKey);
     this.evictIfNeeded();
     this.store.set(authKey, accountCookie);
-    return await setMpCookie(authKey, accountCookie.toJSON());
+    return await setLoginSessionCookie(authKey, accountCookie.toJSON());
   }
 
   /**
