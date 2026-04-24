@@ -17,15 +17,27 @@ const items = ref<NavItem[]>([
   { name: '设置', icon: 'i-lucide:settings', href: '/dashboard/settings' },
   // { name: '技术支持 & 赞助', icon: 'i-lucide:heart-handshake', href: '/dashboard/support' },
 ]);
+
+const props = withDefaults(defineProps<{ mobile?: boolean }>(), {
+  mobile: false,
+});
+
+const linkClass = computed(() => {
+  if (props.mobile) {
+    return 'flex min-h-[44px] items-center gap-3 rounded-md px-3 text-base nav-link';
+  }
+
+  return 'flex h-8 items-center gap-2 rounded-md px-2 text-sm nav-link';
+});
 </script>
 
 <template>
-  <nav class="flex-1 mt-6">
+  <nav :class="[mobile ? 'mt-4' : 'mt-6', 'flex-1']">
     <ul class="flex flex-col gap-2">
       <li v-for="item in items" :key="item.name">
-        <NuxtLink :to="item.href" class="flex h-8 items-center gap-2 rounded-md px-2 text-sm nav-link">
+        <NuxtLink :to="item.href" :class="linkClass">
           <UIcon :name="item.icon" class="size-5 opacity-80" />
-          <p>{{ item.name }}</p>
+          <p class="min-w-0 flex-1">{{ item.name }}</p>
           <UBadge v-if="item.tags" v-for="tag in item.tags" color="fuchsia" variant="subtle">{{ tag }}</UBadge>
         </NuxtLink>
       </li>
