@@ -1,4 +1,5 @@
-import { startManualSyncJob } from '~/server/utils/manual-sync-jobs';
+import { getAccountInfoRecord } from '~/server/utils/account-info';
+import { startInterfaceSyncJob, startManualSyncJob } from '~/server/utils/manual-sync-jobs';
 
 export default defineEventHandler(async (event) => {
   const body = await readBody(event);
@@ -29,7 +30,10 @@ export default defineEventHandler(async (event) => {
   }
 
   try {
-    const status = await startManualSyncJob({
+    const account = await getAccountInfoRecord(fakeid, { includeDisabled: true });
+    const startSyncJob = account?.isInterface ? startInterfaceSyncJob : startManualSyncJob;
+
+    const status = await startSyncJob({
       fakeid,
       nickname,
       roundHeadImg,

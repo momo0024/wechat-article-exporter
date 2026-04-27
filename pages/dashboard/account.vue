@@ -302,6 +302,41 @@ async function loadAccountArticle(account: MpAccount) {
   }
 }
 
+function createSingleAccountSyncSuccessMessage(account: Pick<MpAccount, 'nickname' | 'is_interface'>, status: ManualSyncJobStatus) {
+  const rangeHint = isSyncAll() ? '' : `（同步范围：${getSyncRangeLabel()}）`;
+
+  if (account.is_interface) {
+    return `公众号【${account.nickname}】文章列表已同步完毕${rangeHint}，接口添加账号不生成文档`;
+  }
+
+  const exportSummary = `生成 ${status.generated} 篇，跳过 ${status.skipped} 篇，失败 ${status.failed} 篇`;
+  return `公众号【${account.nickname}】已同步完毕${rangeHint}，${exportSummary}`;
+}
+
+function createBatchSyncSuccessMessage(
+  rows: Array<Pick<MpAccount, 'is_interface'>>,
+  totals: { generated: number; skipped: number; failed: number }
+) {
+  const rangeHint = isSyncAll() ? '' : `（同步范围：${getSyncRangeLabel()}）`;
+  const interfaceCount = rows.filter(account => account.is_interface).length;
+
+  if (interfaceCount === rows.length) {
+    return `已成功同步 ${rows.length} 个公众号${rangeHint}，接口添加账号仅同步文章列表，不生成文档`;
+  }
+
+  if (interfaceCount > 0) {
+    return (
+      `已成功同步 ${rows.length} 个公众号${rangeHint}，其中 ${interfaceCount} 个接口添加账号仅同步文章列表；` +
+      `其余账号文档生成 ${totals.generated} 篇，跳过 ${totals.skipped} 篇，失败 ${totals.failed} 篇`
+    );
+  }
+
+  return (
+    `已成功同步 ${rows.length} 个公众号${rangeHint}，` +
+    `文档生成 ${totals.generated} 篇，跳过 ${totals.skipped} 篇，失败 ${totals.failed} 篇`
+  );
+}
+
 // 同步所有公众号
 async function loadSelectedAccountArticle() {
   if (!checkLogin()) return;
@@ -330,10 +365,13 @@ async function loadSelectedAccountArticle() {
       totalFailed += status.failed;
     }
 
-    const rangeHint = isSyncAll() ? '' : `（同步范围：${getSyncRangeLabel()}）`;
     toast.success(
       '同步完成',
-      `已成功同步 ${rows.length} 个公众号${rangeHint}，文档生成 ${totalGenerated} 篇，跳过 ${totalSkipped} 篇，失败 ${totalFailed} 篇`
+      createBatchSyncSuccessMessage(rows, {
+        generated: totalGenerated,
+        skipped: totalSkipped,
+        failed: totalFailed,
+      })
     );
   } catch (e: any) {
     if (e.message === '已取消同步') {
@@ -510,9 +548,7 @@ const columnDefs = ref<ColDef[]>([
 
         loadAccountArticle(params.data)
           .then((status) => {
-            const rangeHint = isSyncAll() ? '' : `（同步范围：${getSyncRangeLabel()}）`;
-            const exportSummary = `生成 ${status.generated} 篇，跳过 ${status.skipped} 篇，失败 ${status.failed} 篇`;
-            toast.success('同步完成', `公众号【${params.data.nickname}】已同步完毕${rangeHint}，${exportSummary}`);
+            toast.success('同步完成', createSingleAccountSyncSuccessMessage(params.data, status));
           })
           .catch(e => {
             if (e.message === '已取消同步') {
