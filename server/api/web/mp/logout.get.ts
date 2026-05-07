@@ -3,6 +3,7 @@
  */
 
 import { parseCookies, setCookie as setResponseCookie } from 'h3';
+import { getAuthKeyCookieBaseOptions } from '~/server/utils/auth-key-cookie';
 import { cookieStore, getTokenFromStore } from '~/server/utils/CookieStore';
 import { proxyMpRequest } from '~/server/utils/proxy-request';
 
@@ -37,12 +38,9 @@ export default defineEventHandler(async event => {
 
   // 清除浏览器的 auth-key HttpOnly cookie
   setResponseCookie(event, 'auth-key', 'EXPIRED', {
-    path: '/',
     expires: new Date(0),
     maxAge: 0,
-    secure: true,
-    httpOnly: true,
-    sameSite: 'lax',
+    ...getAuthKeyCookieBaseOptions(event),
   });
 
   return {

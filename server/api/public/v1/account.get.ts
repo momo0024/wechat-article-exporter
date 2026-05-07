@@ -1,4 +1,5 @@
 import { getPool } from '~/server/db/postgres';
+import { resolveSessionExpiresAtMs } from '~/server/kv/cookie';
 import { AccountCookie, getTokenFromStore } from '~/server/utils/CookieStore';
 import { proxyMpRequest } from '~/server/utils/proxy-request';
 
@@ -14,15 +15,17 @@ export default defineEventHandler(async event => {
 
   if (!token) {
     const pool = getPool();
-    const now = Math.round(Date.now() / 1000);
     const sessionRes = await pool.query(
-      `SELECT auth_key, token, cookies FROM session WHERE expires_at > $1 ORDER BY created_at DESC LIMIT 1`,
-      [now]
+      `SELECT auth_key, token, cookies, created_at, expires_at FROM session WHERE expires_at > 0 ORDER BY created_at DESC LIMIT 1`
     );
     const session = sessionRes.rows[0];
     if (session?.token && session?.cookies) {
       const accountCookie = AccountCookie.create(session.token, session.cookies);
-      if (!accountCookie.isExpired) {
+      const sessionExpiresAtMs = resolveSessionExpiresAtMs({
+        createdAtSeconds: Number(session.created_at || 0),
+        expiresAtSeconds: Number(session.expires_at || 0),
+      });
+      if (!accountCookie.isExpired && sessionExpiresAtMs) {
         token = session.token;
         cookie = accountCookie.toString();
       }

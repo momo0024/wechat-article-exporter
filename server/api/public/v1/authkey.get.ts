@@ -1,4 +1,5 @@
 import { setCookie as setResponseCookie } from 'h3';
+import { getAuthKeyCookieBaseOptions } from '~/server/utils/auth-key-cookie';
 import { cookieStore } from '~/server/utils/CookieStore';
 import { getAuthKeyFromRequest } from '~/server/utils/proxy-request';
 
@@ -16,11 +17,8 @@ export default defineEventHandler(async event => {
   } else {
     if (authKey) {
       setResponseCookie(event, 'auth-key', 'EXPIRED', {
-        path: '/',
         maxAge: 0,
-        secure: true,
-        httpOnly: true,
-        sameSite: 'lax',
+        ...getAuthKeyCookieBaseOptions(event),
       });
     }
 

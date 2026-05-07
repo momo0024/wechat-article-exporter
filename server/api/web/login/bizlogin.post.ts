@@ -2,8 +2,8 @@ import { request } from '#shared/utils/request';
 import { getCookieFromResponse, getCookiesFromRequest } from '~/server/utils/CookieStore';
 import {
   getEffectiveSessionExpiresAt,
+  getSessionTtlSeconds,
   getSessionExpiresAt,
-  SESSION_TTL_SECONDS,
   updateSessionProfile,
 } from '~/server/kv/cookie';
 import { cookieStore } from '~/server/utils/CookieStore';
@@ -63,7 +63,7 @@ export default defineEventHandler(async event => {
 
   const accountCookie = await cookieStore.getAccountCookie(authKey);
   const sessionExpiresAt = await getSessionExpiresAt(authKey);
-  const fallbackExpiresAt = Date.now() + SESSION_TTL_SECONDS * 1000;
+  const fallbackExpiresAt = Date.now() + getSessionTtlSeconds() * 1000;
   const expiresAt = getEffectiveSessionExpiresAt({
     sessionExpiresAtMs: sessionExpiresAt || fallbackExpiresAt,
     cookieExpiresAtMs: accountCookie?.expiresAt || null,

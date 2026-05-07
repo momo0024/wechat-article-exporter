@@ -1,5 +1,5 @@
 import { AccountCookie } from '~/server/utils/CookieStore';
-import { getRemainingSessionSeconds } from '~/server/kv/cookie';
+import { getRemainingSessionSeconds, resolveSessionExpiresAtMs } from '~/server/kv/cookie';
 import { buildListSyncableAccountsQuery, listSyncableAccounts } from '~/server/utils/account-info';
 import { enqueueAccountSync } from '~/server/utils/account-sync-queue';
 import { compactEscapedJson } from '~/server/utils/async-log';
@@ -47,8 +47,7 @@ export async function checkCookieExpiry(): Promise<void> {
   const pool = getPool();
   const now = Math.round(Date.now() / 1000);
   const res = await pool.query(
-    `SELECT auth_key, token, cookies, expires_at FROM session WHERE expires_at > $1`,
-    [now],
+    `SELECT auth_key, token, cookies, created_at, expires_at FROM session WHERE expires_at > 0`,
   );
 
   if (res.rows.length === 0) {
@@ -58,11 +57,22 @@ export async function checkCookieExpiry(): Promise<void> {
   }
 
   const expiryWarnings: string[] = [];
+  let hasActiveSession = false;
   for (const row of res.rows) {
     const accountCookie = AccountCookie.create(row.token, row.cookies);
     const cookies = row.cookies as Array<Record<string, any>>;
+    const sessionExpiresAtMs = resolveSessionExpiresAtMs({
+      createdAtSeconds: Number(row.created_at || 0),
+      expiresAtSeconds: Number(row.expires_at || 0),
+    });
+    const sessionRemainSec = getRemainingSessionSeconds(sessionExpiresAtMs, now * 1000);
 
-    const sessionRemainSec = row.expires_at - now;
+    if (sessionRemainSec <= 0) {
+      continue;
+    }
+
+    hasActiveSession = true;
+
     if (sessionRemainSec < warningWindowSec) {
       const hours = Math.round(sessionRemainSec / 3600 * 10) / 10;
       expiryWarnings.push(`Session(${row.auth_key.substring(0, 8)}...): 剩余 ${hours} 小时`);
@@ -82,6 +92,12 @@ export async function checkCookieExpiry(): Promise<void> {
     if (accountCookie.isExpired) {
       expiryWarnings.push(`Session(${row.auth_key.substring(0, 8)}...): Cookie 已过期`);
     }
+  }
+
+  if (!hasActiveSession) {
+    console.warn('[schedule] 没有有效的 session，无法同步。请先登录微信公众号平台。');
+    await sendCookieExpiryWarning('当前没有任何有效的登录会话，请立即重新扫码登录。', warningWindowHours);
+    return;
   }
 
   if (expiryWarnings.length > 0) {
@@ -108,7 +124,7 @@ export async function runAutoSync(): Promise<void> {
     console.error('[schedule] 没有有效的 session，跳过同步');
     return;
   }
-  console.log(`[schedule] 使用 session: ${session.authKey.substring(0, 8)}... | 剩余有效期 ${formatRemainingHours(session.effectiveExpiresAtMs)}`);
+  console.log(`[schedule] 使用 session: ${session.authKey.substring(0, 8)}... | 本地剩余有效期 ${formatRemainingHours(session.effectiveExpiresAtMs)}`);
 
   const syncableAccountsQuery = buildListSyncableAccountsQuery();
   console.log(`[schedule] 查询待同步公众号 SQL: ${compactEscapedJson({

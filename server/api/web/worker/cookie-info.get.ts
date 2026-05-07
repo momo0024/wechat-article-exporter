@@ -1,6 +1,7 @@
 import { setCookie as setResponseCookie } from 'h3';
-import { getEffectiveSessionExpiresAt, getRemainingSessionSeconds } from '~/server/kv/cookie';
+import { getEffectiveSessionExpiresAt, getRemainingSessionSeconds, resolveSessionExpiresAtMs } from '~/server/kv/cookie';
 import { getPool } from '~/server/db/postgres';
+import { getAuthKeyCookieBaseOptions } from '~/server/utils/auth-key-cookie';
 import { cookieStore } from '~/server/utils/CookieStore';
 import { getAuthKeyFromRequest } from '~/server/utils/proxy-request';
 
@@ -16,26 +17,28 @@ export default defineEventHandler(async (event) => {
   }
 
   const pool = getPool();
-  const now = Math.round(Date.now() / 1000);
   const res = await pool.query(
-    `SELECT expires_at FROM session WHERE auth_key = $1 AND expires_at > $2 LIMIT 1`,
-    [authKey, now]
+    `SELECT created_at, expires_at FROM session WHERE auth_key = $1 AND expires_at > 0 LIMIT 1`,
+    [authKey]
   );
 
   const accountCookie = await cookieStore.getAccountCookie(authKey);
-  if (res.rows.length === 0 || !accountCookie || accountCookie.isExpired) {
+  const sessionExpiresAt = res.rows[0]
+    ? resolveSessionExpiresAtMs({
+        createdAtSeconds: Number(res.rows[0].created_at || 0),
+        expiresAtSeconds: Number(res.rows[0].expires_at || 0),
+      })
+    : null;
+
+  if (res.rows.length === 0 || !accountCookie || accountCookie.isExpired || !sessionExpiresAt) {
     setResponseCookie(event, 'auth-key', 'EXPIRED', {
-      path: '/',
       expires: new Date(0),
       maxAge: 0,
-      secure: true,
-      httpOnly: true,
-      sameSite: 'lax',
+      ...getAuthKeyCookieBaseOptions(event),
     });
     return { valid: false, expiresAt: null };
   }
 
-  const sessionExpiresAt = Number(res.rows[0].expires_at || 0) * 1000;
   const expiresAt = getEffectiveSessionExpiresAt({
     sessionExpiresAtMs: sessionExpiresAt,
     cookieExpiresAtMs: accountCookie.expiresAt,
@@ -44,23 +47,17 @@ export default defineEventHandler(async (event) => {
 
   if (maxAge <= 0) {
     setResponseCookie(event, 'auth-key', 'EXPIRED', {
-      path: '/',
       expires: new Date(0),
       maxAge: 0,
-      secure: true,
-      httpOnly: true,
-      sameSite: 'lax',
+      ...getAuthKeyCookieBaseOptions(event),
     });
     return { valid: false, expiresAt: null };
   }
 
   setResponseCookie(event, 'auth-key', authKey, {
-    path: '/',
     maxAge,
     expires: new Date(Date.now() + maxAge * 1000),
-    secure: true,
-    httpOnly: true,
-    sameSite: 'lax',
+    ...getAuthKeyCookieBaseOptions(event),
   });
 
   return { valid: true, expiresAt };

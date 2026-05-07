@@ -3,7 +3,7 @@ import { request } from '#shared/utils/request';
 import LoginModal from '~/components/modal/Login.vue';
 import StorageUsage from '~/components/StorageUsage.vue';
 import { IMAGE_PROXY } from '~/config';
-import type { LogoutResponse } from '~/types/types';
+import type { LoginAccount, LogoutResponse } from '~/types/types';
 
 const loginAccount = useLoginAccount();
 const modal = useModal();
@@ -67,15 +67,34 @@ async function refreshCookieExpiry() {
   }
 }
 
+async function refreshLoginAccount() {
+  try {
+    loginAccount.value = await request<LoginAccount | null>('/api/web/login/account');
+  } catch {
+    // 静默忽略
+  }
+}
+
+async function syncLoginState() {
+  if (loginAccount.value) {
+    await refreshCookieExpiry();
+    return;
+  }
+
+  await refreshLoginAccount();
+}
+
 let timer: number;
 let refreshTimer: number;
 onMounted(() => {
   timer = window.setInterval(() => {
     now.value = new Date();
   }, 1000);
-  // 每60秒从服务端同步cookie过期时间
-  refreshCookieExpiry();
-  refreshTimer = window.setInterval(refreshCookieExpiry, 60000);
+  // 每60秒从服务端同步登录态和有效期
+  void syncLoginState();
+  refreshTimer = window.setInterval(() => {
+    void syncLoginState();
+  }, 60000);
 });
 onUnmounted(() => {
   window.clearInterval(timer);
@@ -113,7 +132,7 @@ onUnmounted(() => {
         </UButton>
       </div>
       <div class="text-sm">
-        <span>登录信息过期时间还剩: </span>
+        <span>本地剩余有效期: </span>
         <span class="font-mono" :class="warning ? 'text-rose-500' : 'text-green-500'">{{ distance }}</span>
       </div>
     </div>

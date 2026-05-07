@@ -1,7 +1,7 @@
 import { ARTICLE_LIST_PAGE_SIZE, RETRY_POLICY, USER_AGENT } from '~/config';
 import type { AppMsgEx, PublishInfo, PublishListItem } from '~/types/types';
 import { getPool } from '~/server/db/postgres';
-import { getEffectiveSessionExpiresAt } from '~/server/kv/cookie';
+import { getEffectiveSessionExpiresAt, resolveSessionExpiresAtMs } from '~/server/kv/cookie';
 import { compactEscapedJson } from '~/server/utils/async-log';
 import { AccountCookie, cookieStore } from '~/server/utils/CookieStore';
 import { resolveArticleCover, resolveArticleDeleted, resolveArticleDigest } from '~/server/utils/article-record';
@@ -571,10 +571,8 @@ function filterPublishListForSync(
 
 export async function getActiveSession(): Promise<ActiveSession | null> {
   const pool = getPool();
-  const now = Math.round(Date.now() / 1000);
   const res = await pool.query(
-    `SELECT auth_key, token, cookies, expires_at FROM session WHERE expires_at > $1 ORDER BY created_at DESC LIMIT 1`,
-    [now],
+    `SELECT auth_key, token, cookies, created_at, expires_at FROM session WHERE expires_at > 0 ORDER BY created_at DESC LIMIT 1`,
   );
   if (res.rows.length === 0) {
     return null;
@@ -582,12 +580,16 @@ export async function getActiveSession(): Promise<ActiveSession | null> {
 
   const row = res.rows[0];
   const accountCookie = AccountCookie.create(row.token, row.cookies);
-  if (accountCookie.isExpired) {
+  const sessionExpiresAtMs = resolveSessionExpiresAtMs({
+    createdAtSeconds: Number(row.created_at || 0),
+    expiresAtSeconds: Number(row.expires_at || 0),
+  });
+  if (accountCookie.isExpired || !sessionExpiresAtMs) {
     return null;
   }
 
   const effectiveExpiresAtMs = getEffectiveSessionExpiresAt({
-    sessionExpiresAtMs: Number(row.expires_at || 0) * 1000,
+    sessionExpiresAtMs: sessionExpiresAtMs,
     cookieExpiresAtMs: accountCookie.expiresAt,
   });
 

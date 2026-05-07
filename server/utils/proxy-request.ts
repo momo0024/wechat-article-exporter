@@ -1,4 +1,3 @@
-import dayjs from 'dayjs';
 import { H3Event, parseCookies } from 'h3';
 import { v4 as uuidv4 } from 'uuid';
 import { isDev, USER_AGENT } from '~/config';
@@ -9,34 +8,11 @@ import {
   getSessionExpiresAt,
 } from '~/server/kv/cookie';
 import { RequestOptions } from '~/server/types';
+import { createCookieHeader, createExpiredCookieHeader } from '~/server/utils/auth-key-cookie';
 import { AccountCookie, cookieStore, getCookieFromStore } from '~/server/utils/CookieStore';
 import { logRequest, logResponse } from '~/server/utils/logger';
 
-function createAuthKeyCookie(authKey: string, maxAgeSeconds: number): string {
-  return [
-    `auth-key=${authKey}`,
-    'Path=/',
-    `Expires=${dayjs().add(maxAgeSeconds, 'second').toDate().toUTCString()}`,
-    `Max-Age=${maxAgeSeconds}`,
-    'Secure',
-    'HttpOnly',
-    'SameSite=Lax',
-  ].join('; ');
-}
-
-function createExpiredCookie(name: string): string {
-  return [
-    `${name}=EXPIRED`,
-    'Path=/',
-    'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
-    'Max-Age=0',
-    'Secure',
-    'HttpOnly',
-    'SameSite=Lax',
-  ].join('; ');
-}
-
-async function createSessionBoundAuthKeyCookie(authKey: string): Promise<string> {
+async function createSessionBoundAuthKeyCookie(event: H3Event, authKey: string): Promise<string> {
   const [sessionExpiresAt, accountCookie] = await Promise.all([
     getSessionExpiresAt(authKey),
     cookieStore.getAccountCookie(authKey),
@@ -48,10 +24,14 @@ async function createSessionBoundAuthKeyCookie(authKey: string): Promise<string>
   const maxAgeSeconds = getRemainingSessionSeconds(effectiveExpiresAt);
 
   if (maxAgeSeconds <= 0) {
-    return createExpiredCookie('auth-key');
+    return createExpiredCookieHeader(event, 'auth-key');
   }
 
-  return createAuthKeyCookie(authKey, maxAgeSeconds);
+  return createCookieHeader(event, {
+    name: 'auth-key',
+    value: authKey,
+    maxAge: maxAgeSeconds,
+  });
 }
 
 function maskAuthKey(authKey: string): string {
@@ -159,10 +139,10 @@ export async function proxyMpRequest(options: RequestOptions) {
       console.log('cookie 写入成功');
 
       setCookies = [
-        await createSessionBoundAuthKeyCookie(authKey),
+        await createSessionBoundAuthKeyCookie(options.event, authKey),
 
         // 登录成功后，删除浏览器的 uuid cookie
-        createExpiredCookie('uuid'),
+        createExpiredCookieHeader(options.event, 'uuid'),
       ];
     } catch (error) {
       console.error('action(login) failed:', error);
@@ -189,7 +169,7 @@ export async function proxyMpRequest(options: RequestOptions) {
 
     const authKey = getAuthKeyFromRequest(options.event);
     if (authKey) {
-      setCookies.unshift(await createSessionBoundAuthKeyCookie(authKey));
+      setCookies.unshift(await createSessionBoundAuthKeyCookie(options.event, authKey));
     }
   }
 
