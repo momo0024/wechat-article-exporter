@@ -6,6 +6,7 @@ import { docsWebSite } from '~/config';
 import { gotoLink } from '~/utils';
 
 const modal = useModal();
+const { logout } = useAppAuth();
 
 // CredentialDialog 相关变量
 const credentialsDialogOpen = ref(false);
@@ -99,6 +100,17 @@ const isCredentialActive = computed(() => credentialState.value === 'active');
           @click="gotoLink('https://github.com/wechat-article/wechat-article-exporter')"
           name="i-lucide:github"
           class="size-7 text-zinc-400 hover:text-blue-500 cursor-pointer transition-colors"
+        />
+      </UTooltip>
+    </li>
+
+    <!-- 系统退出 -->
+    <li>
+      <UTooltip text="退出系统">
+        <UIcon
+          @click="async () => { await logout(); navigateTo('/login'); }"
+          name="i-lucide:log-out"
+          class="size-7 text-zinc-400 hover:text-rose-500 cursor-pointer transition-colors"
         />
       </UTooltip>
     </li>
