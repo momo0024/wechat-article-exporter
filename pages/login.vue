@@ -78,7 +78,7 @@
         </form>
       </div>
 
-      <p class="mt-6 text-center text-xs text-slate-500">默认账号: admin / admin</p>
+<!--      <p class="mt-6 text-center text-xs text-slate-500">默认账号: admin / admin</p>-->
     </div>
   </div>
 </template>
