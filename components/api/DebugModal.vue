@@ -8,10 +8,17 @@ interface Props {
 }
 const props = defineProps<Props>();
 
+// 已下线的接口不参与在线调试
+const availableApis = computed(() => apis.filter(api => !(api as { offline?: boolean }).offline));
+
 const isOpen = ref(false);
 const selectedApi = ref(apis[0]);
 
 const payload: Ref<Record<string, any>> = ref({});
+// 会员令牌（X-Api-Token）：所有接口通用，填写后按会员额度调用；留空按游客
+const apiToken = ref('');
+// 会员/限速层关闭时（fork 私有部署）不显示令牌输入
+const membershipEnabled = useRuntimeConfig().public.membership.enabled;
 
 const host = window.location.protocol + '//' + window.location.host;
 
@@ -67,20 +74,28 @@ function submit() {
     url += '?' + new URLSearchParams(params).toString();
   }
 
+  const headers: Record<string, string> = {};
+  const token = apiToken.value.trim();
+  if (token) {
+    headers['X-Api-Token'] = token;
+  }
+
   btnLoading.value = true;
   resp.value = null;
   
   const options: RequestInit = {
     method: selectedApi.value.method,
+    headers,
   };
-  
+
   if (selectedApi.value.method === 'POST') {
     options.headers = {
-      'Content-Type': 'application/json'
+      ...headers,
+      'Content-Type': 'application/json',
     };
     options.body = JSON.stringify(payload.value);
   }
-  
+
   fetch(url, options)
     .then(resp => {
       if (resp.headers.get('content-type') === 'application/json') {
@@ -123,7 +138,7 @@ function submit() {
             <USelectMenu
               class="flex-1"
               v-model="selectedApi"
-              :options="apis"
+              :options="availableApis"
               option-attribute="name"
               @change="apiChange"
             >
@@ -166,6 +181,13 @@ function submit() {
             <div>
               <p class="font-semibold mb-2">请求方式:</p>
               <p class="font-mono border p-2 rounded-md">{{ selectedApi.method }}</p>
+            </div>
+            <div v-if="membershipEnabled">
+              <p class="font-semibold mb-2">
+                会员令牌 (X-Api-Token)：
+                <span class="text-xs font-normal text-gray-400">可选，填写后按会员额度调用，留空按游客</span>
+              </p>
+              <UInput v-model="apiToken" placeholder="粘贴会员令牌 (X-Api-Token)" />
             </div>
             <div>
               <p class="font-semibold mb-2">参数:</p>

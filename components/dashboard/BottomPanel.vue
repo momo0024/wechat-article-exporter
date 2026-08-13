@@ -39,7 +39,11 @@ const logoutBtnLoading = ref(false);
 async function logout() {
   logoutBtnLoading.value = true;
   try {
-    await request<LogoutResponse>('/api/web/mp/logout');
+    const { statusCode, statusText } = await request<LogoutResponse>('/api/web/mp/logout');
+    // 接口调用失败时，提示消息，但是不阻止前端退出
+    if (statusCode !== 200) {
+      alert(statusText);
+    }
   } catch (e) {
     console.warn('登出请求失败:', e);
   }

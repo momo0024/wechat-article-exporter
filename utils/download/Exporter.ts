@@ -1,8 +1,8 @@
 import dayjs from 'dayjs';
 import mime from 'mime';
-import TurndownService from 'turndown';
 import { filterInvalidFilenameChars, sleep } from '#shared/utils/helpers';
 import { parseCgiDataNew } from '#shared/utils/html';
+import { createTurndownService } from '#shared/utils/markdown';
 import { renderHTMLFromCgiDataNew, renderTextFromCgiDataNew } from '#shared/utils/renderer';
 import usePreferences from '~/composables/usePreferences';
 import { injectPdfStyleTag, needsRenderedHtmlFallback } from '~/utils/download/pdf-helpers';
@@ -450,7 +450,7 @@ export class Exporter extends BaseDownloader {
     const total = this.urls.length;
     this.emit('export:total', total);
 
-    const turndownService = new TurndownService();
+    const turndownService = createTurndownService();
 
     await this.processFileExportQueue(this.urls, async url => {
       const filename = await this.exportDirName(url);
@@ -460,7 +460,7 @@ export class Exporter extends BaseDownloader {
       if (!content) {
         throw new Error(`文章(url: ${url})内容为空，不能导出 Markdown`);
       }
-      const markdown = turndownService.turndown(content);
+      const markdown = turndownService.turndown(content).trim();
 
       const blob = new Blob([markdown], { type: 'text/markdown' });
       await this.writeFile(filename + '.md', blob);

@@ -2,6 +2,7 @@ import { getPool } from '~/server/db/postgres';
 import { resolveSessionExpiresAtMs } from '~/server/kv/cookie';
 import { AccountCookie, getTokenFromStore } from '~/server/utils/CookieStore';
 import { proxyMpRequest } from '~/server/utils/proxy-request';
+import { enforceRateLimit } from '~/server/utils/rate-limit';
 
 interface SearchBizQuery {
   begin?: number;
@@ -10,6 +11,10 @@ interface SearchBizQuery {
 }
 
 export default defineEventHandler(async event => {
+  // 分级限流（查询类）：游客 5 次/分钟（按 IP），会员 100 次/分钟（按 X-Api-Token）
+  // membership.enabled=false 时不会限速
+  await enforceRateLimit(event, 'query');
+
   let token = await getTokenFromStore(event);
   let cookie: string | null = null;
 

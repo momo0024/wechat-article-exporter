@@ -4,16 +4,18 @@ export default defineNuxtConfig({
   devtools: {
     enabled: false,
   },
-  devServer:{
-    port:3001
+  devServer: {
+    port: 3001,
   },
-  modules: ['@vueuse/nuxt', '@nuxt/ui', 'nuxt-monaco-editor', '@sentry/nuxt/module', 'nuxt-umami'],
+  modules: ['@vueuse/nuxt', '@nuxt/ui', 'nuxt-monaco-editor', 'nuxt-umami'],
   ssr: false,
   runtimeConfig: {
     public: {
       aggridLicense: process.env.NUXT_AGGRID_LICENSE,
-      sentry: {
-        dsn: process.env.NUXT_SENTRY_DSN,
+      // 公开托管站标记（仅公开托管用；默认关闭，fork 私有部署无限速、无下线提示）
+      // 开启后：公开 API 按游客/会员分层限速，文档页展示限速说明与 API 下线提示
+      membership: {
+        enabled: process.env.NUXT_PUBLIC_MEMBERSHIP_ENABLED === 'true',
       },
     },
     debugMpRequest: false,
@@ -39,13 +41,23 @@ export default defineNuxtConfig({
   },
   nitro: {
     minify: process.env.NODE_ENV === 'production',
+    // 开启 wasm 支持（unwasm）：cgi 沙箱 @cf-wasm/quickjs 以 import 方式引入 .wasm 模块，
+    // 需要该插件处理（含 edge/CF 约定的 `.wasm?module` 后缀），否则 rollup 无法加载 wasm。
+    experimental: {
+      wasm: true,
+    },
     rollupConfig: {
       external: ['puppeteer'],
     },
     storage: {
       kv: {
         driver: process.env.NITRO_KV_DRIVER || 'memory',
-        base: process.env.NITRO_KV_BASE,
+        // cloudflare-kv-binding 驱动使用；Workers 部署时对应 wrangler.toml 中的 KV 绑定名。
+        // fs / memory 驱动会忽略该选项，因此对 Docker / 本地 dev 无影响。
+        binding: 'KV',
+        // base 对 fs 驱动是存储目录(.data/kv)；但对 cloudflare-kv-binding 会变成键前缀，
+        // 导致读到 `.data/kv:member:xxx` 而非 `member:xxx` → 键不匹配。故 CF 下不加 base。
+        base: process.env.NITRO_KV_DRIVER === 'cloudflare-kv-binding' ? undefined : process.env.NITRO_KV_BASE,
       },
     },
     externals: {
@@ -64,14 +76,6 @@ export default defineNuxtConfig({
       codeEditor: 'MonacoEditor', // 普通编辑器组件名
       diffEditor: 'MonacoDiffEditor', // 差异编辑器组件名
     },
-  },
-
-  // https://docs.sentry.io/platforms/javascript/guides/nuxt/manual-setup/
-  sentry: {
-    org: process.env.NUXT_SENTRY_ORG,
-    project: process.env.NUXT_SENTRY_PROJECT,
-    authToken: process.env.NUXT_SENTRY_AUTH_TOKEN,
-    telemetry: false,
   },
 
   // https://umami.nuxt.dev/api/configuration
